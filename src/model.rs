@@ -1,0 +1,203 @@
+use ahash::AHashMap;
+use anyhow::{Context, Result};
+use rand::prelude::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarkovModel {
+    pub order: usize,
+    markov_chain: AHashMap<String, AHashMap<char, usize>>,
+    normed_chain: AHashMap<String, AHashMap<char, f64>>,
+    pub prior: f64,
+    alphabet: Vec<char>,
+}
+
+impl MarkovModel {
+    pub fn new(order: usize) -> Self {
+        Self {
+            order,
+            markov_chain: AHashMap::new(),
+            normed_chain: AHashMap::new(),
+            prior: 0.001,
+            alphabet: Vec::new(),
+        }
+    }
+
+    /// Train the model on input data
+    pub fn train(&mut self, training_data: &str, count: usize) {
+        let chars: Vec<char> = training_data.chars().collect();
+        
+        for i in 0..chars.len().saturating_sub(self.order) {
+            let current_ngram: String = chars[i..i + self.order].iter().collect();
+            let next_letter = chars[i + self.order];
+
+            self.markov_chain
+                .entry(current_ngram)
+                .or_insert_with(AHashMap::new)
+                .entry(next_letter)
+                .and_modify(|c| *c += count)
+                .or_insert(count);
+
+            if !self.alphabet.contains(&next_letter) {
+                self.alphabet.push(next_letter);
+            }
+        }
+    }
+
+    /// Normalize the transition matrix and compute prior
+    pub fn normalize_model_and_compute_prior(&mut self) {
+        // Normalize transition matrix
+        for (ngram, transitions) in &self.markov_chain {
+            let total: usize = transitions.values().sum();
+            let normalized: AHashMap<char, f64> = transitions
+                .iter()
+                .map(|(k, v)| (*k, *v as f64 / total as f64))
+                .collect();
+            self.normed_chain.insert(ngram.clone(), normalized);
+        }
+
+        // Sort alphabet
+        self.alphabet.sort();
+
+        // Compute minimum probability as prior
+        let probabilities: Vec<f64> = self
+            .normed_chain
+            .values()
+            .flat_map(|d| d.values())
+            .copied()
+            .collect();
+
+        if let Some(&min_prob) = probabilities.iter().min_by(|a, b| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            self.prior = 0.01 * min_prob;
+        }
+    }
+
+    /// Generate a simulated sequence from the model
+    pub fn simulate(&self, length: usize, start: Option<&str>) -> Result<String> {
+        self.check_if_trained()?;
+
+        let mut rng = thread_rng();
+        let mut simulation = if let Some(start_str) = start {
+            start_str.to_string()
+        } else {
+            self.normed_chain
+                .keys()
+                .choose(&mut rng)
+                .context("No n-grams in model")?
+                .clone()
+        };
+
+        let target_length = length.max(simulation.len());
+        let chars_to_generate = target_length.saturating_sub(simulation.len());
+
+        for _ in 0..chars_to_generate {
+            let ngram = if simulation.len() >= self.order {
+                &simulation[simulation.len() - self.order..]
+            } else {
+                &simulation
+            };
+            let next_char = self.generate_letter(ngram)?;
+            simulation.push(next_char);
+        }
+
+        Ok(simulation)
+    }
+
+    /// Generate a random letter from an n-gram
+    fn generate_letter(&self, ngram: &str) -> Result<char> {
+        let mut rng = thread_rng();
+
+        if let Some(distribution) = self.normed_chain.get(ngram) {
+            let mut r: f64 = rng.gen();
+            for (key, prob) in distribution {
+                r -= prob;
+                if r <= 0.0 {
+                    return Ok(*key);
+                }
+            }
+        }
+
+        self.alphabet
+            .choose(&mut rng)
+            .copied()
+            .context("Empty alphabet")
+    }
+
+    /// Compute the log likelihood of a sequence
+    pub fn log_likelihood(&self, sequence: &str) -> f64 {
+        if self.normed_chain.is_empty() {
+            return self.prior.ln();
+        }
+
+        let chars: Vec<char> = sequence.chars().collect();
+        let mut log_likelihoods = Vec::new();
+
+        for i in 0..chars.len().saturating_sub(self.order) {
+            let ngram: String = chars[i..i + self.order].iter().collect();
+            let next_letter = chars[i + self.order];
+
+            let probability = self
+                .normed_chain
+                .get(&ngram)
+                .and_then(|d| d.get(&next_letter))
+                .copied()
+                .unwrap_or(self.prior);
+
+            log_likelihoods.push(probability.ln());
+        }
+
+        if log_likelihoods.is_empty() {
+            self.prior.ln()
+        } else {
+            let sum: f64 = log_likelihoods.iter().sum();
+            sum / log_likelihoods.len() as f64
+        }
+    }
+
+    fn check_if_trained(&self) -> Result<()> {
+        if self.normed_chain.is_empty() {
+            anyhow::bail!("Must train model before simulating new sequences");
+        }
+        Ok(())
+    }
+
+    /// Check if the model is trained
+    pub fn is_trained(&self) -> bool {
+        !self.normed_chain.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_basic_training() {
+        let mut model = MarkovModel::new(2);
+        model.train("hello world", 1);
+        assert!(!model.markov_chain.is_empty());
+    }
+
+    #[test]
+    fn test_log_likelihood() {
+        let mut model = MarkovModel::new(2);
+        model.train("hello hello hello", 1);
+        model.normalize_model_and_compute_prior();
+        
+        let score = model.log_likelihood("hello");
+        assert!(score.is_finite());
+    }
+
+    #[test]
+    fn test_simulate() {
+        let mut model = MarkovModel::new(2);
+        model.train("abcabcabc", 1);
+        model.normalize_model_and_compute_prior();
+        
+        let result = model.simulate(10, None);
+        assert!(result.is_ok());
+        assert!(result.unwrap().len() >= 2);
+    }
+}
