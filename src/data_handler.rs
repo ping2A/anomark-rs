@@ -1,8 +1,11 @@
 use ahash::AHashMap;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use csv::ReaderBuilder;
 use regex::Regex;
 use serde::Deserialize;
+use serde_json::Value;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DataRow {
@@ -107,6 +110,66 @@ pub fn load_csv_with_columns(path: &str) -> Result<Vec<AHashMap<String, String>>
 /// Load data from TXT file
 pub fn load_txt(path: &str) -> Result<String> {
     Ok(std::fs::read_to_string(path)?)
+}
+
+/// Convert a JSON value to string for storage in row maps
+fn json_value_to_string(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => String::new(),
+        Value::Array(arr) => serde_json::to_string(arr).unwrap_or_default(),
+        Value::Object(obj) => serde_json::to_string(obj).unwrap_or_default(),
+    }
+}
+
+/// Load data from JSONL file, extracting one field (e.g. "command") per line
+pub fn load_jsonl(path: &str, column_name: &str) -> Result<Vec<String>> {
+    let file = File::open(path).context("Failed to open JSONL file")?;
+    let reader = BufReader::new(file);
+    let mut data = Vec::new();
+
+    for (line_num, line) in reader.lines().enumerate() {
+        let line = line.context("Failed to read line")?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line)
+            .with_context(|| format!("Invalid JSON at line {}", line_num + 1))?;
+        let obj = value.as_object().context("Each line must be a JSON object")?;
+        if let Some(v) = obj.get(column_name) {
+            data.push(json_value_to_string(v));
+        }
+    }
+
+    Ok(data)
+}
+
+/// Load JSONL file with all fields as string key-value pairs (for detection output)
+pub fn load_jsonl_with_columns(path: &str) -> Result<Vec<AHashMap<String, String>>> {
+    let file = File::open(path).context("Failed to open JSONL file")?;
+    let reader = BufReader::new(file);
+    let mut data = Vec::new();
+
+    for (line_num, line) in reader.lines().enumerate() {
+        let line = line.context("Failed to read line")?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line)
+            .with_context(|| format!("Invalid JSON at line {}", line_num + 1))?;
+        let obj = value.as_object().context("Each line must be a JSON object")?;
+        let mut row = AHashMap::new();
+        for (k, v) in obj {
+            row.insert(k.clone(), json_value_to_string(v));
+        }
+        data.push(row);
+    }
+
+    Ok(data)
 }
 
 /// Process dataframe-like data with slicing options
@@ -233,5 +296,37 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], "line4");
         assert_eq!(result[1], "line5");
+    }
+
+    #[test]
+    fn test_load_jsonl() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, r#"{{"timestamp":"2026-03-09T00:10:06","event_type":"process","user":"0","command":"/sbin/init","pid":1,"ppid":0}}"#).unwrap();
+        writeln!(f, r#"{{"timestamp":"2026-03-09T00:10:06","event_type":"process","user":"0","command":"[kthreadd]","pid":2,"ppid":0}}"#).unwrap();
+        f.flush().unwrap();
+
+        let commands = load_jsonl(f.path().to_str().unwrap(), "command").unwrap();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0], "/sbin/init");
+        assert_eq!(commands[1], "[kthreadd]");
+    }
+
+    #[test]
+    fn test_load_jsonl_with_columns() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, r#"{{"timestamp":"2026-03-09T00:10:06","event_type":"process","user":"0","command":"/sbin/init","pid":1,"ppid":0}}"#).unwrap();
+        f.flush().unwrap();
+
+        let rows = load_jsonl_with_columns(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("command"), Some(&"/sbin/init".to_string()));
+        assert_eq!(rows[0].get("pid"), Some(&"1".to_string()));
+        assert_eq!(rows[0].get("event_type"), Some(&"process".to_string()));
     }
 }

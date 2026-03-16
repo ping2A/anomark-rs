@@ -1,20 +1,24 @@
 use anyhow::Result;
-use anomark::{load_csv_with_columns, ModelHandler};
+use anomark::{load_csv_with_columns, load_jsonl_with_columns, ModelHandler};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name = "apply-model")]
 #[command(about = "Apply a trained Markov model to detect anomalies", long_about = None)]
 struct Args {
-    /// Path of the data to work on (csv file)
+    /// Path of the data to work on (CSV or JSONL file)
     #[arg(short, long)]
     data: String,
+
+    /// Input format: csv, jsonl, or auto (detect from file extension)
+    #[arg(long, default_value = "auto")]
+    format: String,
 
     /// Path to the model to use
     #[arg(short, long)]
     model: String,
 
-    /// The column name on which we want to execute the model
+    /// The column/field name on which we want to execute the model (e.g. "command" for JSONL)
     #[arg(short, long)]
     column: String,
 
@@ -62,9 +66,19 @@ fn main() -> Result<()> {
     println!("Loading model from {}...", args.model);
     let mut model = ModelHandler::load_model(&args.model)?;
 
-    // Load data
-    println!("Loading data from {}...", args.data);
-    let data = load_csv_with_columns(&args.data)?;
+    // Detect format and load data
+    let is_jsonl = match args.format.to_lowercase().as_str() {
+        "jsonl" => true,
+        "csv" => false,
+        _ => args.data.ends_with(".jsonl"),
+    };
+
+    println!("Loading data from {} ({})...", args.data, if is_jsonl { "JSONL" } else { "CSV" });
+    let data = if is_jsonl {
+        load_jsonl_with_columns(&args.data)?
+    } else {
+        load_csv_with_columns(&args.data)?
+    };
 
     // Execute model on data
     let results = ModelHandler::execute_on_data(

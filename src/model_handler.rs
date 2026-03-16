@@ -1,4 +1,4 @@
-use crate::data_handler::{apply_all_placeholders, load_csv_with_columns};
+use crate::data_handler::apply_all_placeholders;
 use crate::model::MarkovModel;
 use ahash::AHashMap;
 use anyhow::{Context, Result};

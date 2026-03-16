@@ -200,8 +200,10 @@ mod tests {
         let grouped = group_results(results, "cmd");
 
         assert_eq!(grouped.len(), 2);
-        // cmd2 should be first (better score)
-        assert_eq!(grouped[0].command_line, "cmd2");
-        assert_eq!(grouped[0].score, -3.0);
+        // Sorted by score ascending (worst first): cmd1 (-6.0) then cmd2 (-3.0)
+        assert_eq!(grouped[0].command_line, "cmd1");
+        assert_eq!(grouped[0].score, -6.0);
+        assert_eq!(grouped[1].command_line, "cmd2");
+        assert_eq!(grouped[1].score, -3.0);
     }
 }
