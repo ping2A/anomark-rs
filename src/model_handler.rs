@@ -1,5 +1,6 @@
 use crate::data_handler::apply_all_placeholders;
 use crate::model::MarkovModel;
+use crate::token_model::TokenMarkovModel;
 use ahash::AHashMap;
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -99,20 +100,107 @@ impl ModelHandler {
         Ok(model)
     }
 
-    /// Execute model on dataset and return scored results
+    /// Save a token model to disk
+    pub fn save_token_model(model: &TokenMarkovModel, save_path: Option<&str>) -> Result<String> {
+        println!("Saving token model...");
+        let path = if let Some(p) = save_path {
+            p.to_string()
+        } else {
+            let now = Local::now();
+            format!(
+                "./models/{}_token_model_{}grams.bin",
+                now.format("%Y%m%d_%Hh%M"),
+                model.order
+            )
+        };
+        std::fs::create_dir_all("./models")?;
+        let file = File::create(&path)?;
+        let writer = BufWriter::new(file);
+        bincode::serialize_into(writer, model).context("Failed to serialize token model")?;
+        println!("Successfully saved token model in: {}", path);
+        Ok(path)
+    }
+
+    /// Load a token model from disk
+    pub fn load_token_model(path: &str) -> Result<TokenMarkovModel> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        bincode::deserialize_from(reader).context("Failed to deserialize token model")
+    }
+
+    /// Execute token model on dataset. Threshold for explain = 95% of prior log.
+    pub fn execute_on_data_token(
+        model: &TokenMarkovModel,
+        data: Vec<AHashMap<String, String>>,
+        col_name: &str,
+        apply_placeholder: bool,
+        apply_filepath: bool,
+        with_explain: bool,
+    ) -> Result<Vec<ScoredResult>> {
+        let threshold = model.prior.ln() * 0.95;
+        println!("Applying token model to data...");
+        let pb = ProgressBar::new(data.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        let mut grouped: AHashMap<String, ScoredResult> = AHashMap::new();
+
+        for row in data {
+            let mut text = row.get(col_name).context("Column not found")?.clone();
+            if apply_placeholder {
+                text = apply_all_placeholders(&text, apply_filepath);
+            }
+            let (score, unusual) = if with_explain {
+                let (s, u) = model.explain(&text, threshold);
+                (s, Some(u.into_iter().map(|(ng, lp)| UnusualNgram { ngram: ng, log_prob: lp }).collect()))
+            } else {
+                (model.log_likelihood(&text), None)
+            };
+
+            let entry = grouped.entry(text.clone()).or_insert_with(|| ScoredResult {
+                command_line: text.clone(),
+                score,
+                other_fields: AHashMap::new(),
+                unusual_ngrams: unusual.clone(),
+            });
+            for (key, value) in row {
+                if key != col_name {
+                    entry.other_fields.entry(key).or_insert_with(Vec::new).push(value);
+                }
+            }
+            if score < entry.score {
+                entry.score = score;
+                entry.unusual_ngrams = unusual;
+            }
+            pb.inc(1);
+        }
+        pb.finish_with_message("Execution complete");
+        let mut results: Vec<ScoredResult> = grouped.into_values().collect();
+        results.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(results)
+    }
+
+    /// Execute model on dataset and return scored results.
+    /// If `with_explain` is true, populates `unusual_ngrams` using `explain_threshold_percent` (default 95).
     pub fn execute_on_data(
         model: &mut MarkovModel,
         data: Vec<AHashMap<String, String>>,
         col_name: &str,
         apply_placeholder: bool,
         apply_filepath: bool,
+        with_explain: bool,
+        explain_threshold_percent: f64,
     ) -> Result<Vec<ScoredResult>> {
         if !model.is_trained() {
             model.normalize_model_and_compute_prior();
         }
 
         println!("Applying model to data...");
-        
+        let threshold = Self::compute_threshold(model, explain_threshold_percent);
+
         let pb = ProgressBar::new(data.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
@@ -121,7 +209,6 @@ impl ModelHandler {
                 .progress_chars("#>-"),
         );
 
-        let mut results = Vec::new();
         let mut grouped: AHashMap<String, ScoredResult> = AHashMap::new();
 
         for row in data {
@@ -134,15 +221,20 @@ impl ModelHandler {
             }
 
             let padded = format!("{}{}", "~".repeat(model.order), text);
-            let score = model.log_likelihood(&padded);
+            let (score, unusual) = if with_explain {
+                let (s, u) = model.explain(&padded, threshold);
+                (s, Some(u.into_iter().map(|(ng, lp)| UnusualNgram { ngram: ng, log_prob: lp }).collect()))
+            } else {
+                (model.log_likelihood(&padded), None)
+            };
 
             let entry = grouped.entry(text.clone()).or_insert_with(|| ScoredResult {
-                command_line: text,
+                command_line: text.clone(),
                 score,
                 other_fields: AHashMap::new(),
+                unusual_ngrams: unusual.clone(),
             });
 
-            // Aggregate other columns
             for (key, value) in row {
                 if key != col_name {
                     entry.other_fields
@@ -152,9 +244,9 @@ impl ModelHandler {
                 }
             }
 
-            // Keep minimum score for this command line
             if score < entry.score {
                 entry.score = score;
+                entry.unusual_ngrams = unusual;
             }
 
             pb.inc(1);
@@ -162,7 +254,7 @@ impl ModelHandler {
 
         pb.finish_with_message("Execution complete");
 
-        results = grouped.into_values().collect();
+        let mut results: Vec<ScoredResult> = grouped.into_values().collect();
         results.sort_by(|a, b| {
             a.score.partial_cmp(&b.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -203,6 +295,7 @@ impl ModelHandler {
         nb_lines: usize,
         color: bool,
         show_percentage: bool,
+        show_explain: bool,
     ) {
         println!("_______");
         println!("Displaying top {}", nb_lines);
@@ -222,6 +315,17 @@ impl ModelHandler {
                 let percentage = (result.score / model.prior.ln() * 100.0).round();
                 println!("{}%", percentage);
             }
+
+            if show_explain {
+                if let Some(ref un) = result.unusual_ngrams {
+                    if !un.is_empty() {
+                        println!("  unusual n-grams: {}", un.iter()
+                            .map(|u| format!("{:?}({:.2})", u.ngram, u.log_prob))
+                            .collect::<Vec<_>>()
+                            .join(", "));
+                    }
+                }
+            }
         }
         println!("_______");
     }
@@ -233,6 +337,7 @@ impl ModelHandler {
         model: &MarkovModel,
         color: bool,
         show_percentage: bool,
+        show_explain: bool,
     ) -> Result<String> {
         println!("Saving results...");
         
@@ -259,6 +364,9 @@ impl ModelHandler {
         }
         if show_percentage {
             headers.push("Percentage".to_string());
+        }
+        if show_explain {
+            headers.push("UnusualNgrams".to_string());
         }
         wtr.write_record(&headers)?;
 
@@ -296,6 +404,16 @@ impl ModelHandler {
                 record.push(format!("{}%", percentage));
             }
 
+            if show_explain {
+                let reason = result.unusual_ngrams.as_ref()
+                    .map(|un| un.iter()
+                        .map(|u| format!("{} ({:.2})", u.ngram, u.log_prob))
+                        .collect::<Vec<_>>()
+                        .join("; "))
+                    .unwrap_or_default();
+                record.push(reason);
+            }
+
             wtr.write_record(&record)?;
         }
 
@@ -305,9 +423,18 @@ impl ModelHandler {
     }
 }
 
+/// One unusual n-gram contributing to a low score (explainability).
+#[derive(Debug, Clone)]
+pub struct UnusualNgram {
+    pub ngram: String,
+    pub log_prob: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ScoredResult {
     pub command_line: String,
     pub score: f64,
     pub other_fields: AHashMap<String, Vec<String>>,
+    /// When explainability is enabled: n-grams with log_prob below threshold
+    pub unusual_ngrams: Option<Vec<UnusualNgram>>,
 }

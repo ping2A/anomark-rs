@@ -127,16 +127,27 @@ impl MarkovModel {
 
     /// Compute the log likelihood of a sequence
     pub fn log_likelihood(&self, sequence: &str) -> f64 {
-        if self.normed_chain.is_empty() {
+        let ngrams = self.log_likelihood_ngrams(sequence);
+        if ngrams.is_empty() {
             return self.prior.ln();
         }
+        let sum: f64 = ngrams.iter().map(|(_, lp)| lp).sum();
+        sum / ngrams.len() as f64
+    }
 
+    /// Per-(order+1)-gram log probabilities. Each element is (ngram_string, log_prob).
+    /// Used for explainability: which n-grams contributed to a low score.
+    pub fn log_likelihood_ngrams(&self, sequence: &str) -> Vec<(String, f64)> {
+        if self.normed_chain.is_empty() {
+            return Vec::new();
+        }
         let chars: Vec<char> = sequence.chars().collect();
-        let mut log_likelihoods = Vec::new();
+        let mut out = Vec::with_capacity(chars.len().saturating_sub(self.order));
 
         for i in 0..chars.len().saturating_sub(self.order) {
             let ngram: String = chars[i..i + self.order].iter().collect();
             let next_letter = chars[i + self.order];
+            let full_ngram: String = chars[i..=i + self.order].iter().collect();
 
             let probability = self
                 .normed_chain
@@ -145,15 +156,25 @@ impl MarkovModel {
                 .copied()
                 .unwrap_or(self.prior);
 
-            log_likelihoods.push(probability.ln());
+            out.push((full_ngram, probability.ln()));
         }
+        out
+    }
 
-        if log_likelihoods.is_empty() {
+    /// Explain a sequence: overall score and list of unusual n-grams (log_prob below threshold).
+    /// Unusual n-grams are those contributing most to anomaly.
+    pub fn explain(&self, sequence: &str, threshold: f64) -> (f64, Vec<(String, f64)>) {
+        let ngrams = self.log_likelihood_ngrams(sequence);
+        let score = if ngrams.is_empty() {
             self.prior.ln()
         } else {
-            let sum: f64 = log_likelihoods.iter().sum();
-            sum / log_likelihoods.len() as f64
-        }
+            ngrams.iter().map(|(_, lp)| lp).sum::<f64>() / ngrams.len() as f64
+        };
+        let unusual: Vec<(String, f64)> = ngrams
+            .into_iter()
+            .filter(|(_, lp)| *lp < threshold)
+            .collect();
+        (score, unusual)
     }
 
     fn check_if_trained(&self) -> Result<()> {
@@ -199,5 +220,29 @@ mod tests {
         let result = model.simulate(10, None);
         assert!(result.is_ok());
         assert!(result.unwrap().len() >= 2);
+    }
+
+    #[test]
+    fn test_explain_returns_unusual_ngrams() {
+        let mut model = MarkovModel::new(2);
+        model.train("hello world hello world", 1);
+        model.normalize_model_and_compute_prior();
+        let threshold = model.prior.ln() * 0.95;
+        let (score_normal, unusual_normal) = model.explain("~~hello~~", threshold);
+        let (score_weird, unusual_weird) = model.explain("~~xyzq~~", threshold);
+        assert!(score_weird < score_normal);
+        assert!(unusual_weird.len() > unusual_normal.len());
+    }
+
+    #[test]
+    fn test_log_likelihood_ngrams() {
+        let mut model = MarkovModel::new(2);
+        // Train on a sequence long enough for order 2 (need at least 3 chars per n-gram)
+        model.train("~~ab~~", 1);
+        model.normalize_model_and_compute_prior();
+        let ngrams = model.log_likelihood_ngrams("~~ab~~");
+        assert!(!ngrams.is_empty());
+        let avg: f64 = ngrams.iter().map(|(_, lp)| lp).sum::<f64>() / ngrams.len() as f64;
+        assert!((avg - model.log_likelihood("~~ab~~")).abs() < 1e-10);
     }
 }

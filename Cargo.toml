@@ -43,6 +43,14 @@ name = "generate-logs"
 path = "src/bin/generate_logs.rs"
 
 [[bin]]
+name = "train-token-model"
+path = "src/bin/train_token_model.rs"
+
+[[bin]]
+name = "apply-token-model"
+path = "src/bin/apply_token_model.rs"
+
+[[bin]]
 name = "apply-model"
 path = "src/bin/apply_model.rs"
 

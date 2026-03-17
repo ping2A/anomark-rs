@@ -14,7 +14,9 @@ A pure Rust implementation of the AnoMark algorithm for detecting malicious comm
 - 📊 **Progress tracking** - Visual progress bars for long-running operations
 - 💾 **Binary serialization** - Efficient model storage with bincode
 - 🎨 **Colored output** - Highlights anomalous characters in terminal
-- 🔧 **CLI tools** - Three command-line utilities for training and execution
+- 🔧 **CLI tools** - Train and apply from CSV, TXT, or JSONL
+- **Explainability** - See which n-grams contributed to a low score (character or token level)
+- **Token-level models** - Optional word/token n-gram models (e.g. by whitespace or path segments)
 
 ## Installation
 
@@ -159,6 +161,60 @@ apply-model -m models/model.bin -d test.csv -c CommandLine -s -n 100
 # Apply with placeholders and percentage scores
 apply-model -m models/model.bin -d test.csv -c CommandLine \
     --placeholder --show-percentage --store
+
+# Explain why a command is anomalous (show unusual n-grams)
+apply-model -m models/model.bin -d test.csv -c CommandLine --explain -n 20
+```
+
+### Explainability
+
+You can get **explanations** for why a command was scored as anomalous: the model reports which **unusual n-grams** (character or token sequences) had low probability and contributed to the low score.
+
+- **Character model**: use `apply-model` with `--explain`. The CLI prints unusual character n-grams for each result, and the CSV export includes an **UnusualNgrams** column (semicolon-separated list of `ngram (log_prob)`).
+- **Token model**: use `apply-token-model` with `--explain` for token-level explanations (e.g. which token transitions were rare).
+
+**How it works**: The model scores each (order+1)-gram in the sequence. N-grams with log-probability below a threshold (e.g. 95% of the prior) are flagged as “unusual” and attached to the result. Lower log-probability means the transition was rare in training, so it contributes to anomaly.
+
+**Example** (character model):
+
+```bash
+apply-model -m models/demo_char.bin -d data/demo_logs.jsonl -c command -n 10 --explain
+```
+
+Output includes lines like:
+
+```
+  unusual n-grams: "xyz"(-7.2), "ab"(-6.8), ...
+```
+
+### Token-level models
+
+Besides **character n-grams**, you can train a **token-level** Markov model (e.g. over words or path segments). This can help when anomalies are better expressed as “unusual token sequences” rather than unusual character sequences.
+
+**Train a token model** (from JSONL or CSV):
+
+```bash
+train-token-model -d data/commands.jsonl -c command -o 2 --tokenizer whitespace --output models/token.bin
+```
+
+**Tokenizer options**:
+
+- `whitespace` – split on spaces (default)
+- `path` – split on `/` and `\`, keeping separators as tokens
+- `whitespace_and_path` – path split, then whitespace within segments
+
+**Apply the token model**:
+
+```bash
+apply-token-model -m models/token.bin -d data/test.jsonl -c command -n 20 --explain
+```
+
+Token models use the same **explainability** as the character model: with `--explain`, results include unusual token transitions (e.g. `"curl -> http" (-5.1)`).
+
+**Demo** (generates data, trains both character and token models, runs detection with explain):
+
+```bash
+./demo_explain_and_token.sh
 ```
 
 ## Placeholder Transformations

@@ -53,6 +53,10 @@ struct Args {
     /// Show human-readable percentage
     #[arg(long)]
     show_percentage: bool,
+
+    /// Explain anomalies: show unusual n-grams that contributed to low score
+    #[arg(long)]
+    explain: bool,
 }
 
 fn main() -> Result<()> {
@@ -87,6 +91,8 @@ fn main() -> Result<()> {
         &args.column,
         args.placeholder,
         args.filepath_placeholder,
+        args.explain,
+        95.0,
     )?;
 
     // Display results if not silent
@@ -97,6 +103,7 @@ fn main() -> Result<()> {
             args.n_lines,
             args.color,
             args.show_percentage,
+            args.explain,
         );
     }
 
@@ -108,6 +115,7 @@ fn main() -> Result<()> {
             &model,
             args.color,
             args.show_percentage,
+            args.explain,
         )?;
     }
 

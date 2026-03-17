@@ -79,6 +79,7 @@ pub fn group_results(
             command_line: text,
             score,
             other_fields: AHashMap::new(),
+            unusual_ngrams: None,
         });
 
         for (key, value) in row {

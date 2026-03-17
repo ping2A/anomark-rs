@@ -3,6 +3,7 @@
 
 use anomark::{
     load_jsonl, load_jsonl_with_columns, LogGenerator, ModelHandler,
+    TokenMarkovModel, Tokenizer,
 };
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -41,6 +42,8 @@ fn test_jsonl_train_and_detect_no_regression() {
         "command",
         false,
         false,
+        false,
+        95.0,
     )
     .unwrap();
 
@@ -86,4 +89,70 @@ fn test_jsonl_trained_model_scores_seen_better_than_junk() {
         score_seen,
         score_junk
     );
+}
+
+/// Explainability: with --explain, every result has unusual_ngrams == Some(...).
+#[test]
+fn test_explain_populates_unusual_ngrams() {
+    let mut gen = LogGenerator::new()
+        .add_normal("normal_cmd")
+        .add_anomalous("weird_xyz");
+    let f = NamedTempFile::new().unwrap();
+    gen.emit(&mut f.as_file(), 20).unwrap();
+    f.as_file().flush().unwrap();
+
+    let commands = load_jsonl(f.path().to_str().unwrap(), "command").unwrap();
+    let mut model = ModelHandler::train_from_csv(&commands, 3, None, None).unwrap();
+    model.normalize_model_and_compute_prior();
+
+    let data = load_jsonl_with_columns(f.path().to_str().unwrap()).unwrap();
+    let results = ModelHandler::execute_on_data(
+        &mut model,
+        data,
+        "command",
+        false,
+        false,
+        true,  // with_explain
+        95.0,
+    )
+    .unwrap();
+
+    for r in &results {
+        assert!(r.unusual_ngrams.is_some(), "with_explain=true => every result has unusual_ngrams Some");
+    }
+}
+
+/// Token model: train on commands, anomalous command should score worse.
+#[test]
+fn test_token_model_detect_anomalous() {
+    let mut gen = LogGenerator::new()
+        .add_normal("curl http://example.com")
+        .add_normal("wget http://example.com")
+        .add_normal("curl https://other.com")
+        .add_anomalous("rm -rf / no way");
+    let f = NamedTempFile::new().unwrap();
+    gen.emit(&mut f.as_file(), 50).unwrap();
+    f.as_file().flush().unwrap();
+
+    let commands = load_jsonl(f.path().to_str().unwrap(), "command").unwrap();
+    let mut token_model = TokenMarkovModel::new(2, Tokenizer::Whitespace);
+    for c in &commands {
+        token_model.train(c, 1);
+    }
+    token_model.normalize_model_and_compute_prior();
+
+    let data = load_jsonl_with_columns(f.path().to_str().unwrap()).unwrap();
+    let results = ModelHandler::execute_on_data_token(
+        &token_model,
+        data,
+        "command",
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+
+    let anomalous = results.iter().find(|r| r.command_line == "rm -rf / no way").unwrap();
+    let normal = results.iter().find(|r| r.command_line == "curl http://example.com").unwrap();
+    assert!(anomalous.score < normal.score);
 }

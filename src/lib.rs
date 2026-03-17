@@ -5,11 +5,15 @@ pub mod model_handler;
 pub mod parallel;
 pub mod streaming;
 pub mod mmap;
+pub mod tokenizer;
+pub mod token_model;
 
 pub use data_handler::*;
 pub use log_generator::{LogGenerator, ProcessEvent};
 pub use model::MarkovModel;
-pub use model_handler::{ModelHandler, ScoredResult};
+pub use model_handler::{ModelHandler, ScoredResult, UnusualNgram};
 pub use parallel::*;
 pub use streaming::*;
 pub use mmap::*;
+pub use tokenizer::Tokenizer;
+pub use token_model::TokenMarkovModel;
