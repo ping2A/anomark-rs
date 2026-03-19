@@ -14,6 +14,58 @@ const MARKOV_SCORE: &str = "markovScore";
 pub struct ModelHandler;
 
 impl ModelHandler {
+    /// Resolve a CSV column or JSON field name: exact match, then ASCII case-insensitive.
+    /// Returns the actual key present in the row (for consistent lookups on all rows).
+    fn resolve_field_key(row: &AHashMap<String, String>, col_name: &str) -> Result<String> {
+        let want = col_name.trim();
+        if want.is_empty() {
+            anyhow::bail!("Column/field name is empty");
+        }
+        if let Some(k) = row.keys().find(|k| k.as_str() == want) {
+            return Ok(k.clone());
+        }
+        let want_lower = want.to_ascii_lowercase();
+        if let Some(k) = row
+            .keys()
+            .find(|k| k.to_ascii_lowercase() == want_lower)
+        {
+            return Ok(k.clone());
+        }
+        let mut keys: Vec<_> = row.keys().map(|s| s.as_str()).collect();
+        keys.sort();
+        anyhow::bail!(
+            "Column/field '{}' not found. Available fields: {}",
+            want,
+            keys.join(", ")
+        );
+    }
+
+    /// Resolve field key by scanning rows until one contains the column (for JSONL with varying fields per line).
+    /// Rows that don't have the column (e.g. other event types) should be skipped by the caller.
+    fn resolve_field_key_from_data(
+        data: &[AHashMap<String, String>],
+        col_name: &str,
+    ) -> Result<String> {
+        for row in data {
+            if let Ok(k) = Self::resolve_field_key(row, col_name) {
+                return Ok(k);
+            }
+        }
+        let sample = data
+            .first()
+            .map(|r| {
+                let mut keys: Vec<_> = r.keys().map(|s| s.as_str()).collect();
+                keys.sort();
+                keys.join(", ")
+            })
+            .unwrap_or_else(|| "no rows".to_string());
+        anyhow::bail!(
+            "Column/field '{}' not found in any row (JSONL may have different fields per line). In first row, available: {}",
+            col_name.trim(),
+            sample
+        );
+    }
+
     /// Train a model from text data
     pub fn train_from_txt(
         training_data: &str,
@@ -148,8 +200,19 @@ impl ModelHandler {
         );
         let mut grouped: AHashMap<String, ScoredResult> = AHashMap::new();
 
+        if data.is_empty() {
+            pb.finish_with_message("No rows to process");
+            return Ok(vec![]);
+        }
+        let field_key = Self::resolve_field_key_from_data(&data, col_name)?;
+        let mut skipped = 0usize;
+
         for row in data {
-            let mut text = row.get(col_name).context("Column not found")?.clone();
+            let Some(mut text) = row.get(&field_key).cloned() else {
+                skipped += 1;
+                pb.inc(1);
+                continue;
+            };
             if apply_placeholder {
                 text = apply_all_placeholders(&text, apply_filepath);
             }
@@ -167,7 +230,7 @@ impl ModelHandler {
                 unusual_ngrams: unusual.clone(),
             });
             for (key, value) in row {
-                if key != col_name {
+                if key != field_key {
                     entry.other_fields.entry(key).or_insert_with(Vec::new).push(value);
                 }
             }
@@ -178,6 +241,9 @@ impl ModelHandler {
             pb.inc(1);
         }
         pb.finish_with_message("Execution complete");
+        if skipped > 0 {
+            println!("Skipped {} rows missing field '{}' (e.g. other event types)", skipped, field_key);
+        }
         let mut results: Vec<ScoredResult> = grouped.into_values().collect();
         results.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
         Ok(results)
@@ -211,10 +277,19 @@ impl ModelHandler {
 
         let mut grouped: AHashMap<String, ScoredResult> = AHashMap::new();
 
+        if data.is_empty() {
+            pb.finish_with_message("No rows to process");
+            return Ok(vec![]);
+        }
+        let field_key = Self::resolve_field_key_from_data(&data, col_name)?;
+        let mut skipped = 0usize;
+
         for row in data {
-            let mut text = row.get(col_name)
-                .context("Column not found")?
-                .clone();
+            let Some(mut text) = row.get(&field_key).cloned() else {
+                skipped += 1;
+                pb.inc(1);
+                continue;
+            };
 
             if apply_placeholder {
                 text = apply_all_placeholders(&text, apply_filepath);
@@ -236,7 +311,7 @@ impl ModelHandler {
             });
 
             for (key, value) in row {
-                if key != col_name {
+                if key != field_key {
                     entry.other_fields
                         .entry(key)
                         .or_insert_with(Vec::new)
@@ -253,6 +328,9 @@ impl ModelHandler {
         }
 
         pb.finish_with_message("Execution complete");
+        if skipped > 0 {
+            println!("Skipped {} rows missing field '{}' (e.g. other event types)", skipped, field_key);
+        }
 
         let mut results: Vec<ScoredResult> = grouped.into_values().collect();
         results.sort_by(|a, b| {
@@ -266,6 +344,11 @@ impl ModelHandler {
     /// Compute threshold as percentage of model prior
     pub fn compute_threshold(model: &MarkovModel, percent: f64) -> f64 {
         model.prior.ln() * percent / 100.0
+    }
+
+    /// True when the line score is below the baseline (more anomalous than typical training).
+    pub fn is_suspect_command(score: f64, suspect_threshold_ln: f64) -> bool {
+        score < suspect_threshold_ln
     }
 
     /// Add colored output to a command line
@@ -288,7 +371,8 @@ impl ModelHandler {
         result.replace("\x1b[0m\x1b[91m", "")
     }
 
-    /// Display top results in terminal
+    /// Display top results in terminal.
+    /// `suspect_threshold_ln`: if `Some(t)`, mark each line SUSPECT when `score < t` (e.g. `prior.ln() * 0.95`).
     pub fn display_top(
         results: &[ScoredResult],
         model: &MarkovModel,
@@ -296,19 +380,43 @@ impl ModelHandler {
         color: bool,
         show_percentage: bool,
         show_explain: bool,
+        suspect_threshold_ln: Option<f64>,
     ) {
         println!("_______");
-        println!("Displaying top {}", nb_lines);
+        println!("Displaying top {} (sorted: most unusual first)", nb_lines);
 
         let threshold = Self::compute_threshold(model, 95.0);
 
-        for result in results.iter().take(nb_lines) {
+        if let Some(t) = suspect_threshold_ln {
+            println!(
+                "SUSPECT = markovScore below baseline ({:.4}); lower score = more unusual vs training.",
+                t
+            );
+        }
+
+        for (i, result) in results.iter().take(nb_lines).enumerate() {
             println!("_______");
-            
+            let rank = i + 1;
+            if let Some(t) = suspect_threshold_ln {
+                let suspect = Self::is_suspect_command(result.score, t);
+                println!(
+                    "#{} — {} | markovScore={:.6}",
+                    rank,
+                    if suspect {
+                        "SUSPECT (this command is flagged as unusual)"
+                    } else {
+                        "not flagged (score at or above baseline)"
+                    },
+                    result.score
+                );
+            } else {
+                println!("#{} | markovScore={:.6}", i + 1, result.score);
+            }
+
             if color {
                 println!("{}", Self::colored_results(&result.command_line, model, threshold));
             } else {
-                println!("{}", result.command_line);
+                println!("Command: {}", result.command_line);
             }
 
             if show_percentage {
@@ -330,7 +438,8 @@ impl ModelHandler {
         println!("_______");
     }
 
-    /// Save results to CSV file
+    /// Save results to CSV file.
+    /// `suspect_threshold_ln`: if `Some(t)`, add column `Suspect` = `yes` when `score < t`.
     pub fn save_results(
         results: &[ScoredResult],
         output: Option<&str>,
@@ -338,6 +447,7 @@ impl ModelHandler {
         color: bool,
         show_percentage: bool,
         show_explain: bool,
+        suspect_threshold_ln: Option<f64>,
     ) -> Result<String> {
         println!("Saving results...");
         
@@ -352,12 +462,19 @@ impl ModelHandler {
 
         let mut wtr = Writer::from_path(&path)?;
 
+        let mut other_keys: Vec<String> = results
+            .first()
+            .map(|r| r.other_fields.keys().cloned().collect())
+            .unwrap_or_default();
+        other_keys.sort();
+
         // Write headers
         let mut headers = vec!["CommandLine".to_string(), MARKOV_SCORE.to_string()];
-        if let Some(first) = results.first() {
-            for key in first.other_fields.keys() {
-                headers.push(format!("List of all {}", key));
-            }
+        if suspect_threshold_ln.is_some() {
+            headers.push("Suspect".to_string());
+        }
+        for key in &other_keys {
+            headers.push(format!("List of all {}", key));
         }
         if color {
             headers.push("Colored CommandLine".to_string());
@@ -378,20 +495,25 @@ impl ModelHandler {
                 result.command_line.clone(),
                 result.score.to_string(),
             ];
-
-            for key in headers.iter().skip(2) {
-                if key.starts_with("List of all ") {
-                    let original_key = key.trim_start_matches("List of all ");
-                    if let Some(values) = result.other_fields.get(original_key) {
-                        let unique: Vec<String> = values.iter()
-                            .map(|s| s.to_string())
-                            .collect::<std::collections::HashSet<_>>()
-                            .into_iter()
-                            .collect();
-                        record.push(unique.join(" - "));
-                    } else {
-                        record.push(String::new());
-                    }
+            if let Some(t) = suspect_threshold_ln {
+                let s = if Self::is_suspect_command(result.score, t) {
+                    "yes"
+                } else {
+                    "no"
+                };
+                record.push(s.to_string());
+            }
+            for original_key in &other_keys {
+                if let Some(values) = result.other_fields.get(original_key) {
+                    let unique: Vec<String> = values
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    record.push(unique.join(" - "));
+                } else {
+                    record.push(String::new());
                 }
             }
 
@@ -437,4 +559,29 @@ pub struct ScoredResult {
     pub other_fields: AHashMap<String, Vec<String>>,
     /// When explainability is enabled: n-grams with log_prob below threshold
     pub unusual_ngrams: Option<Vec<UnusualNgram>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_field_key_exact_and_case_insensitive() {
+        let row = AHashMap::from([
+            ("command".to_string(), "x".to_string()),
+            ("event_type".to_string(), "process".to_string()),
+        ]);
+        assert_eq!(
+            ModelHandler::resolve_field_key(&row, "command").unwrap(),
+            "command"
+        );
+        assert_eq!(
+            ModelHandler::resolve_field_key(&row, "COMMAND").unwrap(),
+            "command"
+        );
+        assert_eq!(
+            ModelHandler::resolve_field_key(&row, "  command  ").unwrap(),
+            "command"
+        );
+    }
 }

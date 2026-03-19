@@ -69,14 +69,17 @@ fn main() -> Result<()> {
         args.explain,
     )?;
 
+    let suspect_ln = model.prior.ln() * 0.95;
+
     if !args.silent {
         ModelHandler::display_top(
             &results,
-            &anomark::MarkovModel::new(1), // dummy for threshold display; we don't use color/percentage
+            &anomark::MarkovModel::new(1), // dummy for color/percentage (unused here)
             args.n_lines,
             false,
             false,
             args.explain,
+            Some(suspect_ln),
         );
     }
 
@@ -88,6 +91,7 @@ fn main() -> Result<()> {
             false,
             false,
             args.explain,
+            Some(suspect_ln),
         )?;
     }
 

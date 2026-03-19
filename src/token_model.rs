@@ -88,6 +88,16 @@ impl TokenMarkovModel {
         !self.normed_chain.is_empty()
     }
 
+    /// Number of distinct token contexts in the normalized chain.
+    pub fn num_contexts(&self) -> usize {
+        self.normed_chain.len()
+    }
+
+    /// Total number of distinct next-token transitions (sum over contexts).
+    pub fn num_transitions(&self) -> usize {
+        self.normed_chain.values().map(|m| m.len()).sum()
+    }
+
     /// Log likelihood of a token sequence (average log prob per transition).
     pub fn log_likelihood_tokens(&self, tokens: &[String]) -> f64 {
         if self.normed_chain.is_empty() {

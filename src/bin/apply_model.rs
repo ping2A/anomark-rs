@@ -95,6 +95,8 @@ fn main() -> Result<()> {
         95.0,
     )?;
 
+    let suspect_ln = ModelHandler::compute_threshold(&model, 95.0);
+
     // Display results if not silent
     if !args.silent {
         ModelHandler::display_top(
@@ -104,6 +106,7 @@ fn main() -> Result<()> {
             args.color,
             args.show_percentage,
             args.explain,
+            Some(suspect_ln),
         );
     }
 
@@ -116,6 +119,7 @@ fn main() -> Result<()> {
             args.color,
             args.show_percentage,
             args.explain,
+            Some(suspect_ln),
         )?;
     }
 

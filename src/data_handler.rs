@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DataRow {
@@ -73,6 +74,71 @@ pub fn apply_all_placeholders(text: &str, apply_filepath: bool) -> String {
     result
 }
 
+/// Expand paths to a list of data files. Each path can be a file or a directory.
+/// - File: included if its extension matches `extension` (e.g. `"csv"`).
+/// - Directory: all non-directory files in it whose extension matches; if `recursive`, descend into subdirs.
+/// Returns sorted, deduplicated paths for stable ordering.
+pub fn expand_data_paths(
+    paths: &[impl AsRef<Path>],
+    extension: &str,
+    recursive: bool,
+) -> Result<Vec<PathBuf>> {
+    let ext_lower = extension.to_lowercase();
+    let mut out: Vec<PathBuf> = Vec::new();
+
+    fn collect(
+        path: &Path,
+        ext: &str,
+        recursive: bool,
+        out: &mut Vec<PathBuf>,
+    ) -> Result<()> {
+        if path.is_file() {
+            if path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .as_deref()
+                == Some(ext)
+            {
+                out.push(path.to_path_buf());
+            }
+            return Ok(());
+        }
+        if path.is_dir() {
+            for e in std::fs::read_dir(path).context("Failed to read directory")? {
+                let e = e?;
+                let p = e.path();
+                if p.is_file() {
+                    if p.extension()
+                        .map(|e| e.to_string_lossy().to_lowercase())
+                        .as_deref()
+                        == Some(ext)
+                    {
+                        out.push(p);
+                    }
+                } else if recursive && p.is_dir() {
+                    collect(&p, ext, true, out)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    for path in paths {
+        let path = path.as_ref();
+        if path.is_file() {
+            if path.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref() == Some(ext_lower.as_str()) {
+                out.push(path.to_path_buf());
+            }
+        } else if path.is_dir() {
+            collect(path, &ext_lower, recursive, &mut out)?;
+        }
+    }
+
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
 /// Load data from CSV file
 pub fn load_csv(path: &str, column_name: &str) -> Result<Vec<String>> {
     let mut reader = ReaderBuilder::new()
@@ -126,6 +192,16 @@ fn json_value_to_string(v: &Value) -> String {
 
 /// Load data from JSONL file, extracting one field (e.g. "command") per line
 pub fn load_jsonl(path: &str, column_name: &str) -> Result<Vec<String>> {
+    load_jsonl_filtered(path, column_name, None, None)
+}
+
+/// Load JSONL with optional filter: only include lines where `filter_field == filter_value` (e.g. event_type -> "process").
+pub fn load_jsonl_filtered(
+    path: &str,
+    column_name: &str,
+    filter_field: Option<&str>,
+    filter_value: Option<&str>,
+) -> Result<Vec<String>> {
     let file = File::open(path).context("Failed to open JSONL file")?;
     let reader = BufReader::new(file);
     let mut data = Vec::new();
@@ -139,6 +215,11 @@ pub fn load_jsonl(path: &str, column_name: &str) -> Result<Vec<String>> {
         let value: Value = serde_json::from_str(line)
             .with_context(|| format!("Invalid JSON at line {}", line_num + 1))?;
         let obj = value.as_object().context("Each line must be a JSON object")?;
+        if let (Some(ff), Some(fv)) = (filter_field, filter_value) {
+            if obj.get(ff).map(|v| json_value_to_string(v) != fv).unwrap_or(true) {
+                continue;
+            }
+        }
         if let Some(v) = obj.get(column_name) {
             data.push(json_value_to_string(v));
         }
@@ -328,5 +409,52 @@ mod tests {
         assert_eq!(rows[0].get("command"), Some(&"/sbin/init".to_string()));
         assert_eq!(rows[0].get("pid"), Some(&"1".to_string()));
         assert_eq!(rows[0].get("event_type"), Some(&"process".to_string()));
+    }
+
+    #[test]
+    fn test_load_jsonl_filtered() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, r#"{{"event_type":"process","command":"/sbin/init"}}"#).unwrap();
+        writeln!(f, r#"{{"event_type":"network","command":"curl x"}}"#).unwrap();
+        writeln!(f, r#"{{"event_type":"process","command":"[kthreadd]"}}"#).unwrap();
+        f.flush().unwrap();
+
+        let all = load_jsonl_filtered(f.path().to_str().unwrap(), "command", None, None).unwrap();
+        assert_eq!(all.len(), 3);
+        let process_only = load_jsonl_filtered(f.path().to_str().unwrap(), "command", Some("event_type"), Some("process")).unwrap();
+        assert_eq!(process_only.len(), 2);
+        assert_eq!(process_only[0], "/sbin/init");
+        assert_eq!(process_only[1], "[kthreadd]");
+    }
+
+    #[test]
+    fn test_expand_data_paths() {
+        use tempfile::{NamedTempFile, TempDir};
+
+        // Single file
+        let f = NamedTempFile::new().unwrap();
+        let p = f.path().to_path_buf();
+        std::fs::rename(f.path(), p.with_extension("csv")).unwrap();
+        let csv_path = p.with_extension("csv");
+        let files = expand_data_paths(&[csv_path.as_path()], "csv", false).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], csv_path);
+
+        // Directory with matching extension
+        let dir = TempDir::new().unwrap();
+        let d = dir.path();
+        let f1 = d.join("a.csv");
+        let f2 = d.join("b.csv");
+        let f3 = d.join("ignore.txt");
+        std::fs::write(&f1, "x").unwrap();
+        std::fs::write(&f2, "y").unwrap();
+        std::fs::write(&f3, "z").unwrap();
+        let files = expand_data_paths(&[d], "csv", false).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|p| p.file_name().unwrap() == "a.csv"));
+        assert!(files.iter().any(|p| p.file_name().unwrap() == "b.csv"));
     }
 }

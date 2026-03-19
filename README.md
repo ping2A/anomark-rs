@@ -14,9 +14,10 @@ A pure Rust implementation of the AnoMark algorithm for detecting malicious comm
 - 📊 **Progress tracking** - Visual progress bars for long-running operations
 - 💾 **Binary serialization** - Efficient model storage with bincode
 - 🎨 **Colored output** - Highlights anomalous characters in terminal
-- 🔧 **CLI tools** - Train and apply from CSV, TXT, or JSONL
+- 🔧 **CLI tools** - One `train` command for CSV / JSONL / TXT character models; `apply-model`, token tools, etc.
 - **Explainability** - See which n-grams contributed to a low score (character or token level)
 - **Token-level models** - Optional word/token n-gram models (e.g. by whitespace or path segments)
+- **Training exclusions** - Drop Linux kernel-style names (`[nvme-wq]`) and/or custom regex patterns before training
 
 ## Installation
 
@@ -40,28 +41,30 @@ cargo build --release
 
 ## Quick Start
 
-### 1. Train a Model from CSV
+### 1. Train a character-level model (CSV, JSONL, or TXT — one binary)
+
+Format is **auto-detected** from each file’s extension (`.csv`, `.jsonl`, `.txt`). You can force a format with `--format csv|jsonl|txt` (e.g. a `.log` file as JSONL). **Do not mix `.txt` with CSV/JSONL in the same run** (train those separately).
 
 ```bash
-cargo run --release --bin train-from-csv -- \
-    -d data/train_data.csv \
-    -c CommandLine \
-    -o 4 \
-    --placeholder
+# CSV
+cargo run --bin train -- -d data/train_data.csv -c CommandLine -o 4 --placeholder
+
+# Plain text (one corpus per file, concatenated)
+cargo run --bin train -- -d data/train_data.txt -o 4
+
+# JSONL (process events; `-c` defaults to `command` if omitted for JSONL-only input)
+cargo run --bin train -- \
+    -d data/events.jsonl \
+    -c command \
+    -o 3 \
+    --filter event_type process \
+    --output models/process_model.bin
 ```
 
-### 2. Train a Model from TXT
+### 2. Apply Model to Detect Anomalies
 
 ```bash
-cargo run --release --bin train-from-txt -- \
-    -d data/train_data.txt \
-    -o 4
-```
-
-### 3. Apply Model to Detect Anomalies
-
-```bash
-cargo run --release --bin apply-model -- \
+cargo run --bin apply-model -- \
     -m models/model.bin \
     -d data/test_data.csv \
     -c CommandLine \
@@ -70,75 +73,89 @@ cargo run --release --bin apply-model -- \
     -n 100
 ```
 
-## Command-Line Tools
+### Excluding commands from training
 
-### train-from-csv
+Linux and similar systems often report kernel threads with a **command line that is only a bracketed name**, e.g. `[kthreadd]`, `[nvme-wq]`. Those strings are usually not useful for learning “normal” userland commands.
 
-Train a model from CSV data with optional data slicing and preprocessing.
+The `train` command and `train-token-model` support:
+
+| Flag | Meaning |
+|------|--------|
+| `--exclude-kernel-threads` | Drop lines where the **entire** command (after trim) matches `[something]` — one pair of brackets, no nested `[`/`]` inside. |
+| `--exclude-regex <PATTERN>` | Drop lines matching this Rust regex (repeatable). Checked against the **full** command string (CSV/JSONL/token) or **each line** (TXT). |
+
+Filtering runs **after** loading and **before** `-n` / `-p` slicing (so limits apply to the kept lines). If everything is excluded, the tool exits with an error.
 
 ```bash
-train-from-csv [OPTIONS] --data <PATH> --column <NAME> --order <NUM>
+# JSONL: train on process commands but skip kernel thread names
+cargo run --bin train -- \
+    -d data/events.jsonl -c command -o 3 \
+    --filter event_type process \
+    --exclude-kernel-threads \
+    --output models/process_userland.bin
+
+# CSV: kernel threads plus any extra pattern (e.g. lines containing "kworker")
+cargo run --bin train -- \
+    -d data.csv -c CommandLine -o 4 \
+    --exclude-kernel-threads \
+    --exclude-regex 'kworker'
+```
+
+## Command-Line Tools
+
+### train
+
+Train a **character-level** Markov model from **CSV**, **JSONL**, and/or **`.txt`** in one CLI. With `--format auto` (default), each file’s type is inferred from its extension; directories collect matching files (under `auto`, all of `.csv`, `.jsonl`, and `.txt` in that tree). **CSV and JSONL can be combined** in one run (same `-c` field name). **Plain `.txt` cannot be mixed** with CSV/JSONL in the same invocation.
+
+```bash
+cargo run --bin train -- [OPTIONS] --data <PATH>... --order <NUM>
 
 Options:
-    -d, --data <PATH>              Path to CSV file
-    -c, --column <NAME>            Column name containing command lines
-    -o, --order <NUM>              N-gram order (window size)
-        --count-column <NAME>      Column containing occurrence counts
-        --output <PATH>            Custom output path for model
-    -n, --n-lines <NUM>            Number of lines to use for training
-    -p, --percentage <PCT>         Percentage of data to use
-        --from-end                 Slice from end of dataset
-    -r, --randomize                Randomize line selection
-        --placeholder              Apply GUID/SID/User/Hash placeholders
-        --filepath-placeholder     Apply filepath placeholders
-        --resume                   Continue training existing model
-    -m, --model <PATH>             Path to existing model (with --resume)
+        --format <FMT>             auto | csv | jsonl | txt [default: auto]
+    -d, --data <PATH>...           File(s) and/or directories (repeatable); use --recursive for subdirs
+        --recursive
+    -c, --column <NAME>            CSV/JSONL field (required for CSV; JSONL-only defaults to command)
+        --filter <FIELD> <VALUE>    JSONL only: keep lines where field equals value
+    -o, --order <NUM>              N-gram order
+        --count-column <NAME>      CSV only: per-row counts
+        --output <PATH>
+    -n, --n-lines <NUM>            Subsample lines (after exclusions)
+    -p, --percentage <PCT>
+        --from-end, -r, --randomize
+        --placeholder, --filepath-placeholder
+        --resume, -m, --model
+        --parallel
+        --exclude-kernel-threads, --exclude-regex <PATTERN>
 ```
 
 **Examples:**
 
 ```bash
-# Basic training
-train-from-csv -d data.csv -c CommandLine -o 4
-
-# Train on first 1000 lines with placeholders
-train-from-csv -d data.csv -c CommandLine -o 4 -n 1000 --placeholder
-
-# Train on 50% of data, randomized
-train-from-csv -d data.csv -c CommandLine -o 4 -p 50 -r
-
-# Resume training from existing model
-train-from-csv -d new_data.csv -c CommandLine --resume -m models/existing.bin
-```
-
-### train-from-txt
-
-Train a model from plain text data.
-
-```bash
-train-from-txt [OPTIONS] --data <PATH> --order <NUM>
-
-Options:
-    -d, --data <PATH>              Path to TXT file
-    -o, --order <NUM>              N-gram order (window size)
-        --output <PATH>            Custom output path for model
-        --placeholder              Apply GUID/SID/User/Hash placeholders
-        --filepath-placeholder     Apply filepath placeholders
-        --resume                   Continue training existing model
-    -m, --model <PATH>             Path to existing model (with --resume)
+cargo run --bin train -- -d data.csv -c CommandLine -o 4
+cargo run --bin train -- -d data.csv -c CommandLine -o 4 -n 1000 --placeholder
+cargo run --bin train -- -d data/ -c CommandLine -o 4 --recursive
+cargo run --bin train -- -d data/commands.txt -o 4
+cargo run --bin train -- -d events.jsonl -o 3 --filter event_type process --output models/proc.bin
+# Force JSONL for a file without .jsonl extension:
+cargo run --bin train -- --format jsonl -d events.log -c command -o 3
+# Merge two CSVs
+cargo run --bin train -- -d a.csv -d b.csv -c CommandLine -o 4
 ```
 
 ### apply-model
 
-Apply a trained model to detect anomalies in new data.
+Apply a trained model to detect anomalies in new data. Input can be **CSV or JSONL**; format is auto-detected from the file extension (`.jsonl` → JSONL) or set with `--format`.
+
+**Mixed JSONL (different fields per line):** If your JSONL has different event types (e.g. some lines with `date`, `file_path`, `event_type` and others with `command`, `pid`), the tool scans all rows to find the first one that has the requested column. Rows that don't have that field (e.g. file events when you use `-c command`) are **skipped**; at the end you'll see e.g. `Skipped N rows missing field 'command' (e.g. other event types)`.
 
 ```bash
-apply-model [OPTIONS] --data <PATH> --model <PATH> --column <NAME>
+cargo run --bin apply-model -- [OPTIONS] --data <PATH> --model <PATH> --column <NAME>
 
 Options:
-    -d, --data <PATH>              Path to CSV file to analyze
+    -d, --data <PATH>              Path to CSV or JSONL file to analyze
     -m, --model <PATH>             Path to trained model
-    -c, --column <NAME>            Column name to analyze
+    -c, --column <NAME>            Column/field to score (e.g. CommandLine for CSV, command for JSONL)
+        --format <FMT>             Input format: csv, jsonl, or auto [default: auto]
     -s, --store                    Save results to CSV
     -o, --output <PATH>            Custom output path
         --color                    Highlight anomalous characters
@@ -147,23 +164,39 @@ Options:
         --placeholder              Apply placeholders to test data
         --filepath-placeholder     Apply filepath placeholders
         --show-percentage          Show anomaly percentage scores
+        --explain                  Show unusual n-grams for each result
 ```
 
-**Examples:**
+**Suspect commands:** Each printed line is labeled **`SUSPECT (this command is flagged as unusual)`** or **`not flagged`** using `markovScore` vs the model baseline (95% of prior log-probability). Exported CSV includes a **`Suspect`** column (`yes` / `no`) right after `markovScore`. Results stay sorted with the **most unusual first** (`#1`).
+
+**Examples (CSV):**
 
 ```bash
 # Basic execution with colored output
-apply-model -m models/model.bin -d test.csv -c CommandLine --color
+cargo run --bin apply-model -- -m models/model.bin -d test.csv -c CommandLine --color
 
 # Save results and show top 100 anomalies
-apply-model -m models/model.bin -d test.csv -c CommandLine -s -n 100
+cargo run --bin apply-model -- -m models/model.bin -d test.csv -c CommandLine -s -n 100
 
 # Apply with placeholders and percentage scores
-apply-model -m models/model.bin -d test.csv -c CommandLine \
+cargo run --bin apply-model -- -m models/model.bin -d test.csv -c CommandLine \
     --placeholder --show-percentage --store
 
 # Explain why a command is anomalous (show unusual n-grams)
-apply-model -m models/model.bin -d test.csv -c CommandLine --explain -n 20
+cargo run --bin apply-model -- -m models/model.bin -d test.csv -c CommandLine --explain -n 20
+```
+
+**Examples (JSONL):**
+
+```bash
+# Run on JSONL (e.g. process events); format auto-detected from .jsonl extension
+cargo run --bin apply-model -- -m models/process_model.bin -d data/events.jsonl -c command -n 20
+
+# Force JSONL when file has no .jsonl extension
+cargo run --bin apply-model -- -m models/process_model.bin -d data/events.log --format jsonl -c command
+
+# JSONL with explain and store
+cargo run --bin apply-model -- -m models/process_model.bin -d data/events.jsonl -c command --explain -s -o results/anomalies.csv
 ```
 
 ### Explainability
@@ -178,7 +211,7 @@ You can get **explanations** for why a command was scored as anomalous: the mode
 **Example** (character model):
 
 ```bash
-apply-model -m models/demo_char.bin -d data/demo_logs.jsonl -c command -n 10 --explain
+cargo run --bin apply-model -- -m models/demo_char.bin -d data/demo_logs.jsonl -c command -n 10 --explain
 ```
 
 Output includes lines like:
@@ -191,10 +224,12 @@ Output includes lines like:
 
 Besides **character n-grams**, you can train a **token-level** Markov model (e.g. over words or path segments). This can help when anomalies are better expressed as “unusual token sequences” rather than unusual character sequences.
 
-**Train a token model** (from JSONL or CSV):
+**Train a token model** (from JSONL or CSV). Same `--exclude-kernel-threads` and `--exclude-regex` as other trainers:
 
 ```bash
-train-token-model -d data/commands.jsonl -c command -o 2 --tokenizer whitespace --output models/token.bin
+cargo run --bin train-token-model -- -d data/commands.jsonl -c command -o 2 --tokenizer whitespace --output models/token.bin
+
+cargo run --bin train-token-model -- -d data/commands.jsonl -c command -o 2 --exclude-kernel-threads --output models/token.bin
 ```
 
 **Tokenizer options**:
@@ -206,7 +241,7 @@ train-token-model -d data/commands.jsonl -c command -o 2 --tokenizer whitespace 
 **Apply the token model**:
 
 ```bash
-apply-token-model -m models/token.bin -d data/test.jsonl -c command -n 20 --explain
+cargo run --bin apply-token-model -- -m models/token.bin -d data/test.jsonl -c command -n 20 --explain
 ```
 
 Token models use the same **explainability** as the character model: with `--explain`, results include unusual token transitions (e.g. `"curl -> http" (-5.1)`).
@@ -216,6 +251,24 @@ Token models use the same **explainability** as the character model: with `--exp
 ```bash
 ./demo_explain_and_token.sh
 ```
+
+### inspect-model
+
+Show **summary statistics** for a saved model (character or token). The tool tries to load as a character model first, then as a token model.
+
+```bash
+cargo run --bin inspect-model -- -m models/my_model.bin
+```
+
+Human-readable output includes: file size, model type, order, prior, whether the chain is trained, number of context n-grams, transition count, and (for character models) alphabet size.
+
+**JSON** (for scripts / dashboards):
+
+```bash
+cargo run --bin inspect-model -- -m models/my_model.bin --json
+```
+
+From Rust you can also use `MarkovModel::num_contexts()`, `num_transitions()`, `alphabet_len()`, and the same on `TokenMarkovModel` (`num_contexts`, `num_transitions`) after loading with `ModelHandler::load_model` / `load_token_model`.
 
 ## Placeholder Transformations
 
@@ -310,6 +363,12 @@ The `order` parameter determines the context window size (typically 3-5 characte
 
 ## Troubleshooting
 
+**Issue**: `Column/field '…' not found` (or old message `Column not found`) when running `apply-model`
+
+- **JSONL**: Field names are **case-sensitive** in the file, but `-c` / `--column` is matched **case-insensitively** (e.g. `-c Command` matches `"command"`). If it still fails, the error lists **available fields** from the first row—use one of those names exactly.
+- **Wrong format**: If the path does not end in `.jsonl` but the file is JSONL, add `--format jsonl`.
+- **CSV**: Use the exact header name from the first line (whitespace matters); case-insensitive matching also applies.
+
 **Issue**: Model file not found
 ```bash
 # Ensure models directory exists
@@ -319,11 +378,11 @@ mkdir -p models
 **Issue**: CSV parsing errors
 ```bash
 # Check CSV format and column names
-cargo run --release --bin apply-model -- --help
+cargo run --bin apply-model -- --help
 ```
 
 **Issue**: Out of memory during training
 ```bash
 # Use line limiting flags
-train-from-csv -d data.csv -c CommandLine -o 4 -n 10000
+cargo run --bin train -- -d data.csv -c CommandLine -o 4 -n 10000
 ```

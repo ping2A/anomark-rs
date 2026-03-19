@@ -27,16 +27,8 @@ ahash = { version = "0.8", features = ["serde"] }
 tempfile = "3.10"
 
 [[bin]]
-name = "train-from-csv"
-path = "src/bin/train_from_csv.rs"
-
-[[bin]]
-name = "train-from-txt"
-path = "src/bin/train_from_txt.rs"
-
-[[bin]]
-name = "train-from-jsonl"
-path = "src/bin/train_from_jsonl.rs"
+name = "train"
+path = "src/bin/train.rs"
 
 [[bin]]
 name = "generate-logs"
@@ -53,6 +45,10 @@ path = "src/bin/apply_token_model.rs"
 [[bin]]
 name = "apply-model"
 path = "src/bin/apply_model.rs"
+
+[[bin]]
+name = "inspect-model"
+path = "src/bin/inspect_model.rs"
 
 [lib]
 name = "anomark"

@@ -156,3 +156,51 @@ fn test_token_model_detect_anomalous() {
     let normal = results.iter().find(|r| r.command_line == "curl http://example.com").unwrap();
     assert!(anomalous.score < normal.score);
 }
+
+/// Mixed JSONL: first row has different fields (date, file_path, ...), later rows have "command".
+/// apply-model should resolve "command" from a later row and skip rows that don't have it.
+#[test]
+fn test_apply_model_mixed_jsonl_skips_rows_without_field() {
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut f = NamedTempFile::new().unwrap();
+    // First line: file event (no "command")
+    writeln!(
+        f,
+        r#"{{"date":"2026-01-01","event_type":"file","file_path":"/etc/passwd","group":"root","owner":"root","permissions":"644","size":"100"}}"#
+    )
+    .unwrap();
+    // Later lines: process events (have "command")
+    writeln!(
+        f,
+        r#"{{"event_type":"process","command":"/usr/bin/curl","pid":1,"ppid":0}}"#
+    )
+    .unwrap();
+    writeln!(
+        f,
+        r#"{{"event_type":"process","command":"/usr/bin/wget","pid":2,"ppid":1}}"#
+    )
+    .unwrap();
+    f.flush().unwrap();
+
+    let commands = vec!["/usr/bin/curl".to_string(), "/usr/bin/wget".to_string()];
+    let mut model = ModelHandler::train_from_csv(&commands, 2, None, None).unwrap();
+    model.normalize_model_and_compute_prior();
+
+    let data = load_jsonl_with_columns(f.path().to_str().unwrap()).unwrap();
+    let results = ModelHandler::execute_on_data(
+        &mut model,
+        data,
+        "command",
+        false,
+        false,
+        false,
+        95.0,
+    )
+    .unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().any(|r| r.command_line == "/usr/bin/curl"));
+    assert!(results.iter().any(|r| r.command_line == "/usr/bin/wget"));
+}

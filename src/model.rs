@@ -188,6 +188,26 @@ impl MarkovModel {
     pub fn is_trained(&self) -> bool {
         !self.normed_chain.is_empty()
     }
+
+    /// Number of distinct context n-grams (states) in the normalized chain.
+    pub fn num_contexts(&self) -> usize {
+        self.normed_chain.len()
+    }
+
+    /// Total number of outgoing transitions (sum over contexts of distinct next characters).
+    pub fn num_transitions(&self) -> usize {
+        self.normed_chain.values().map(|m| m.len()).sum()
+    }
+
+    /// Size of the character alphabet seen during training.
+    pub fn alphabet_len(&self) -> usize {
+        self.alphabet.len()
+    }
+
+    /// Raw count entries in the unnormalized chain (before normalize; 0 if only normalized in memory).
+    pub fn raw_markov_entries(&self) -> usize {
+        self.markov_chain.values().map(|m| m.len()).sum()
+    }
 }
 
 #[cfg(test)]
@@ -244,5 +264,17 @@ mod tests {
         assert!(!ngrams.is_empty());
         let avg: f64 = ngrams.iter().map(|(_, lp)| lp).sum::<f64>() / ngrams.len() as f64;
         assert!((avg - model.log_likelihood("~~ab~~")).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_model_statistics() {
+        let m = MarkovModel::new(3);
+        assert_eq!(m.num_contexts(), 0);
+        assert_eq!(m.num_transitions(), 0);
+        let mut m2 = MarkovModel::new(2);
+        m2.train("abc", 1);
+        m2.normalize_model_and_compute_prior();
+        assert!(m2.num_contexts() > 0);
+        assert!(m2.num_transitions() > 0);
     }
 }
