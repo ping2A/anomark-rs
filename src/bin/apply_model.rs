@@ -1,5 +1,5 @@
 use anyhow::Result;
-use anomark::{load_csv_with_columns, load_jsonl_with_columns, ModelHandler};
+use anomark::{load_csv_with_columns, load_jsonl_with_columns, ModelHandler, TrainLineFilter};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -57,6 +57,14 @@ struct Args {
     /// Explain anomalies: show unusual n-grams that contributed to low score
     #[arg(long)]
     explain: bool,
+
+    /// Skip rows whose command is a kernel-thread-style name (e.g. [kthreadd]); use if you trained with --exclude-kernel-threads
+    #[arg(long)]
+    exclude_kernel_threads: bool,
+
+    /// Skip rows whose command matches this regex (repeatable)
+    #[arg(long = "exclude-regex", value_name = "PATTERN")]
+    exclude_regex: Vec<String>,
 }
 
 fn main() -> Result<()> {
@@ -84,6 +92,12 @@ fn main() -> Result<()> {
         load_csv_with_columns(&args.data)?
     };
 
+    let exclude_filter = if args.exclude_kernel_threads || !args.exclude_regex.is_empty() {
+        Some(TrainLineFilter::new(args.exclude_kernel_threads, &args.exclude_regex)?)
+    } else {
+        None
+    };
+
     // Execute model on data
     let results = ModelHandler::execute_on_data(
         &mut model,
@@ -93,6 +107,7 @@ fn main() -> Result<()> {
         args.filepath_placeholder,
         args.explain,
         95.0,
+        exclude_filter.as_ref(),
     )?;
 
     let suspect_ln = ModelHandler::compute_threshold(&model, 95.0);

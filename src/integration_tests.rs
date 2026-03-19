@@ -91,6 +91,9 @@ fn test_execute_on_data() {
         "CommandLine",
         false,
         false,
+        false,
+        95.0,
+        None,
     ).unwrap();
     
     assert_eq!(results.len(), 2);
@@ -348,6 +351,9 @@ fn test_execute_on_data() {
         "CommandLine",
         false,
         false,
+        false,
+        95.0,
+        None,
     ).unwrap();
     
     assert_eq!(results.len(), 2);

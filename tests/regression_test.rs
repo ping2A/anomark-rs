@@ -44,6 +44,7 @@ fn test_jsonl_train_and_detect_no_regression() {
         false,
         false,
         95.0,
+        None,
     )
     .unwrap();
 
@@ -114,6 +115,7 @@ fn test_explain_populates_unusual_ngrams() {
         false,
         true,  // with_explain
         95.0,
+        None,
     )
     .unwrap();
 
@@ -149,6 +151,7 @@ fn test_token_model_detect_anomalous() {
         false,
         false,
         false,
+        None,
     )
     .unwrap();
 
@@ -197,10 +200,103 @@ fn test_apply_model_mixed_jsonl_skips_rows_without_field() {
         false,
         false,
         95.0,
+        None,
     )
     .unwrap();
 
     assert_eq!(results.len(), 2);
     assert!(results.iter().any(|r| r.command_line == "/usr/bin/curl"));
     assert!(results.iter().any(|r| r.command_line == "/usr/bin/wget"));
+}
+
+/// When applying with --exclude-kernel-threads, kernel-thread-style commands are skipped and do not appear in results.
+/// This matches training with --exclude-kernel-threads: excluded at train time, so they should also be excluded at apply time to avoid false "anomaly" flags.
+#[test]
+fn test_apply_exclude_kernel_threads_skips_in_results() {
+    use anomark::TrainLineFilter;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // Train on normal commands only (as if we had excluded kernel threads during training)
+    let train_commands = vec!["/bin/ls".to_string(), "/usr/bin/curl".to_string()];
+    let mut model = ModelHandler::train_from_csv(&train_commands, 2, None, None).unwrap();
+    model.normalize_model_and_compute_prior();
+
+    // Apply data: mix of normal command and kernel-thread-style [kthreadd]
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(f, r#"{{"event_type":"process","command":"/bin/ls","pid":1,"ppid":0}}"#).unwrap();
+    writeln!(f, r#"{{"event_type":"process","command":"[kthreadd]","pid":2,"ppid":0}}"#).unwrap();
+    writeln!(f, r#"{{"event_type":"process","command":"/usr/bin/curl","pid":3,"ppid":0}}"#).unwrap();
+    f.flush().unwrap();
+
+    let data = anomark::load_jsonl_with_columns(f.path().to_str().unwrap()).unwrap();
+    assert_eq!(data.len(), 3);
+
+    // Without exclude filter: all three appear; [kthreadd] will have a bad score (not in training)
+    let results_no_filter = ModelHandler::execute_on_data(
+        &mut model,
+        data.clone(),
+        "command",
+        false,
+        false,
+        false,
+        95.0,
+        None,
+    )
+    .unwrap();
+    let has_kthreadd = results_no_filter.iter().any(|r| r.command_line == "[kthreadd]");
+    assert!(has_kthreadd, "without filter, [kthreadd] should appear in results (and be scored as anomalous)");
+
+    // With exclude filter: kernel threads skipped, so [kthreadd] must not be in results
+    let filter = TrainLineFilter::new(true, &[]).unwrap();
+    let results_with_filter = ModelHandler::execute_on_data(
+        &mut model,
+        data,
+        "command",
+        false,
+        false,
+        false,
+        95.0,
+        Some(&filter),
+    )
+    .unwrap();
+    assert!(
+        !results_with_filter.iter().any(|r| r.command_line == "[kthreadd]"),
+        "with exclude-kernel-threads, [kthreadd] must not appear in results"
+    );
+    assert_eq!(results_with_filter.len(), 2, "only /bin/ls and /usr/bin/curl");
+}
+
+/// Same as above for token model: apply with exclude filter skips kernel-thread rows.
+#[test]
+fn test_apply_token_model_exclude_kernel_threads_skips_in_results() {
+    use anomark::{TrainLineFilter, Tokenizer};
+
+    let train_commands = vec!["/bin/ls".to_string(), "curl http://x.com".to_string()];
+    let mut token_model = anomark::TokenMarkovModel::new(2, Tokenizer::Whitespace);
+    for c in &train_commands {
+        token_model.train(c, 1);
+    }
+    token_model.normalize_model_and_compute_prior();
+
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(f, r#"{{"command":"/bin/ls"}}"#).unwrap();
+    writeln!(f, r#"{{"command":"[kthreadd]"}}"#).unwrap();
+    writeln!(f, r#"{{"command":"curl http://x.com"}}"#).unwrap();
+    f.flush().unwrap();
+    let data = load_jsonl_with_columns(f.path().to_str().unwrap()).unwrap();
+
+    let filter = TrainLineFilter::new(true, &[]).unwrap();
+    let results = ModelHandler::execute_on_data_token(
+        &token_model,
+        data,
+        "command",
+        false,
+        false,
+        false,
+        Some(&filter),
+    )
+    .unwrap();
+    assert!(!results.iter().any(|r| r.command_line == "[kthreadd]"));
+    assert_eq!(results.len(), 2);
 }

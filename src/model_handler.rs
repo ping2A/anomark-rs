@@ -1,6 +1,7 @@
 use crate::data_handler::apply_all_placeholders;
 use crate::model::MarkovModel;
 use crate::token_model::TokenMarkovModel;
+use crate::train_filter::TrainLineFilter;
 use ahash::AHashMap;
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -181,6 +182,7 @@ impl ModelHandler {
     }
 
     /// Execute token model on dataset. Threshold for explain = 95% of prior log.
+    /// If `exclude_filter` is set, rows whose command matches (e.g. kernel threads) are skipped and not scored.
     pub fn execute_on_data_token(
         model: &TokenMarkovModel,
         data: Vec<AHashMap<String, String>>,
@@ -188,6 +190,7 @@ impl ModelHandler {
         apply_placeholder: bool,
         apply_filepath: bool,
         with_explain: bool,
+        exclude_filter: Option<&TrainLineFilter>,
     ) -> Result<Vec<ScoredResult>> {
         let threshold = model.prior.ln() * 0.95;
         println!("Applying token model to data...");
@@ -206,6 +209,7 @@ impl ModelHandler {
         }
         let field_key = Self::resolve_field_key_from_data(&data, col_name)?;
         let mut skipped = 0usize;
+        let mut skipped_excluded = 0usize;
 
         for row in data {
             let Some(mut text) = row.get(&field_key).cloned() else {
@@ -213,6 +217,13 @@ impl ModelHandler {
                 pb.inc(1);
                 continue;
             };
+            if let Some(filter) = exclude_filter {
+                if filter.should_exclude(&text) {
+                    skipped_excluded += 1;
+                    pb.inc(1);
+                    continue;
+                }
+            }
             if apply_placeholder {
                 text = apply_all_placeholders(&text, apply_filepath);
             }
@@ -244,6 +255,9 @@ impl ModelHandler {
         if skipped > 0 {
             println!("Skipped {} rows missing field '{}' (e.g. other event types)", skipped, field_key);
         }
+        if skipped_excluded > 0 {
+            println!("Skipped {} rows excluded by filter (e.g. kernel threads)", skipped_excluded);
+        }
         let mut results: Vec<ScoredResult> = grouped.into_values().collect();
         results.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
         Ok(results)
@@ -251,6 +265,7 @@ impl ModelHandler {
 
     /// Execute model on dataset and return scored results.
     /// If `with_explain` is true, populates `unusual_ngrams` using `explain_threshold_percent` (default 95).
+    /// If `exclude_filter` is set, rows whose command matches (e.g. kernel threads) are skipped and not scored.
     pub fn execute_on_data(
         model: &mut MarkovModel,
         data: Vec<AHashMap<String, String>>,
@@ -259,6 +274,7 @@ impl ModelHandler {
         apply_filepath: bool,
         with_explain: bool,
         explain_threshold_percent: f64,
+        exclude_filter: Option<&TrainLineFilter>,
     ) -> Result<Vec<ScoredResult>> {
         if !model.is_trained() {
             model.normalize_model_and_compute_prior();
@@ -283,6 +299,7 @@ impl ModelHandler {
         }
         let field_key = Self::resolve_field_key_from_data(&data, col_name)?;
         let mut skipped = 0usize;
+        let mut skipped_excluded = 0usize;
 
         for row in data {
             let Some(mut text) = row.get(&field_key).cloned() else {
@@ -290,6 +307,14 @@ impl ModelHandler {
                 pb.inc(1);
                 continue;
             };
+
+            if let Some(filter) = exclude_filter {
+                if filter.should_exclude(&text) {
+                    skipped_excluded += 1;
+                    pb.inc(1);
+                    continue;
+                }
+            }
 
             if apply_placeholder {
                 text = apply_all_placeholders(&text, apply_filepath);
@@ -330,6 +355,9 @@ impl ModelHandler {
         pb.finish_with_message("Execution complete");
         if skipped > 0 {
             println!("Skipped {} rows missing field '{}' (e.g. other event types)", skipped, field_key);
+        }
+        if skipped_excluded > 0 {
+            println!("Skipped {} rows excluded by filter (e.g. kernel threads)", skipped_excluded);
         }
 
         let mut results: Vec<ScoredResult> = grouped.into_values().collect();

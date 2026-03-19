@@ -2,8 +2,7 @@
 
 use anyhow::Result;
 use anomark::{
-    load_csv_with_columns, load_jsonl_with_columns,
-    ModelHandler,
+    load_csv_with_columns, load_jsonl_with_columns, ModelHandler, TrainLineFilter,
 };
 use clap::Parser;
 
@@ -37,6 +36,13 @@ struct Args {
 
     #[arg(long)]
     explain: bool,
+
+    /// Skip rows whose command is a kernel-thread-style name (e.g. [kthreadd])
+    #[arg(long)]
+    exclude_kernel_threads: bool,
+
+    #[arg(long = "exclude-regex", value_name = "PATTERN")]
+    exclude_regex: Vec<String>,
 }
 
 fn main() -> Result<()> {
@@ -60,6 +66,12 @@ fn main() -> Result<()> {
         load_csv_with_columns(&args.data)?
     };
 
+    let exclude_filter = if args.exclude_kernel_threads || !args.exclude_regex.is_empty() {
+        Some(TrainLineFilter::new(args.exclude_kernel_threads, &args.exclude_regex)?)
+    } else {
+        None
+    };
+
     let results = ModelHandler::execute_on_data_token(
         &model,
         data,
@@ -67,6 +79,7 @@ fn main() -> Result<()> {
         false,
         false,
         args.explain,
+        exclude_filter.as_ref(),
     )?;
 
     let suspect_ln = model.prior.ln() * 0.95;

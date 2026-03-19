@@ -84,7 +84,7 @@ The `train` command and `train-token-model` support:
 | `--exclude-kernel-threads` | Drop lines where the **entire** command (after trim) matches `[something]` — one pair of brackets, no nested `[`/`]` inside. |
 | `--exclude-regex <PATTERN>` | Drop lines matching this Rust regex (repeatable). Checked against the **full** command string (CSV/JSONL/token) or **each line** (TXT). |
 
-Filtering runs **after** loading and **before** `-n` / `-p` slicing (so limits apply to the kept lines). If everything is excluded, the tool exits with an error.
+Filtering runs **after** loading and **before** `-n` / `-p` slicing (so limits apply to the kept lines). If everything is excluded, the tool exits with an error. **When applying** the model, use the same `--exclude-kernel-threads` and/or `--exclude-regex` with `apply-model` (or `apply-token-model`) so those rows are skipped and not reported as anomalies.
 
 ```bash
 # JSONL: train on process commands but skip kernel thread names
@@ -165,7 +165,11 @@ Options:
         --filepath-placeholder     Apply filepath placeholders
         --show-percentage          Show anomaly percentage scores
         --explain                  Show unusual n-grams for each result
+        --exclude-kernel-threads   Skip rows whose command is [name]-style (e.g. [kthreadd]); use if you trained with --exclude-kernel-threads
+        --exclude-regex <PATTERN>  Skip rows whose command matches this regex (repeatable)
 ```
+
+**Apply-time exclusions:** If you trained with `--exclude-kernel-threads` (or `--exclude-regex`), use the same flags when applying so those rows are **skipped** and not reported as anomalies. Otherwise kernel threads (e.g. `[nvme-wq]`) will appear with low scores because they were never in the training set.
 
 **Suspect commands:** Each printed line is labeled **`SUSPECT (this command is flagged as unusual)`** or **`not flagged`** using `markovScore` vs the model baseline (95% of prior log-probability). Exported CSV includes a **`Suspect`** column (`yes` / `no`) right after `markovScore`. Results stay sorted with the **most unusual first** (`#1`).
 
