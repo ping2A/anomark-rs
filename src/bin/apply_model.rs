@@ -65,6 +65,14 @@ struct Args {
     /// Skip rows whose command matches this regex (repeatable)
     #[arg(long = "exclude-regex", value_name = "PATTERN")]
     exclude_regex: Vec<String>,
+
+    /// Column/field that contains the machine/host name (e.g. hostname, machine); output will include a Machine column for filtering
+    #[arg(long = "machine-field", value_name = "COLUMN")]
+    machine_field: Option<String>,
+
+    /// Use this value as Machine for every row (e.g. when input has no host column)
+    #[arg(long, value_name = "NAME")]
+    machine: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -108,6 +116,8 @@ fn main() -> Result<()> {
         args.explain,
         95.0,
         exclude_filter.as_ref(),
+        args.machine_field.as_deref(),
+        args.machine.as_deref(),
     )?;
 
     let suspect_ln = ModelHandler::compute_threshold(&model, 95.0);

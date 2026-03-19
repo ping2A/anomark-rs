@@ -94,6 +94,8 @@ fn test_execute_on_data() {
         false,
         95.0,
         None,
+        None,
+        None,
     ).unwrap();
     
     assert_eq!(results.len(), 2);
@@ -353,6 +355,8 @@ fn test_execute_on_data() {
         false,
         false,
         95.0,
+        None,
+        None,
         None,
     ).unwrap();
     

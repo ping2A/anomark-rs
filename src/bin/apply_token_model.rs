@@ -43,6 +43,14 @@ struct Args {
 
     #[arg(long = "exclude-regex", value_name = "PATTERN")]
     exclude_regex: Vec<String>,
+
+    /// Column/field that contains the machine/host name; output will include a Machine column
+    #[arg(long = "machine-field", value_name = "COLUMN")]
+    machine_field: Option<String>,
+
+    /// Use this value as Machine for every row
+    #[arg(long, value_name = "NAME")]
+    machine: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -80,6 +88,8 @@ fn main() -> Result<()> {
         false,
         args.explain,
         exclude_filter.as_ref(),
+        args.machine_field.as_deref(),
+        args.machine.as_deref(),
     )?;
 
     let suspect_ln = model.prior.ln() * 0.95;

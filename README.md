@@ -167,7 +167,11 @@ Options:
         --explain                  Show unusual n-grams for each result
         --exclude-kernel-threads   Skip rows whose command is [name]-style (e.g. [kthreadd]); use if you trained with --exclude-kernel-threads
         --exclude-regex <PATTERN>  Skip rows whose command matches this regex (repeatable)
+        --machine-field <COLUMN>   Column/field that contains the machine/host name (e.g. hostname); output includes a Machine column for filtering
+        --machine <NAME>          Use this value as Machine for every row (e.g. when input has no host column)
 ```
+
+**Machine / host for filtering:** Use `--machine-field hostname` (or your column name) so the CSV and terminal output include a **Machine** column; you can then filter or group by machine. If the input has no host column, use `--machine server01` to tag all rows from this run.
 
 **Apply-time exclusions:** If you trained with `--exclude-kernel-threads` (or `--exclude-regex`), use the same flags when applying so those rows are **skipped** and not reported as anomalies. Otherwise kernel threads (e.g. `[nvme-wq]`) will appear with low scores because they were never in the training set.
 

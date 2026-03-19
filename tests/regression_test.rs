@@ -45,6 +45,8 @@ fn test_jsonl_train_and_detect_no_regression() {
         false,
         95.0,
         None,
+        None,
+        None,
     )
     .unwrap();
 
@@ -116,6 +118,8 @@ fn test_explain_populates_unusual_ngrams() {
         true,  // with_explain
         95.0,
         None,
+        None,
+        None,
     )
     .unwrap();
 
@@ -151,6 +155,8 @@ fn test_token_model_detect_anomalous() {
         false,
         false,
         false,
+        None,
+        None,
         None,
     )
     .unwrap();
@@ -201,6 +207,8 @@ fn test_apply_model_mixed_jsonl_skips_rows_without_field() {
         false,
         95.0,
         None,
+        None,
+        None,
     )
     .unwrap();
 
@@ -242,6 +250,8 @@ fn test_apply_exclude_kernel_threads_skips_in_results() {
         false,
         95.0,
         None,
+        None,
+        None,
     )
     .unwrap();
     let has_kthreadd = results_no_filter.iter().any(|r| r.command_line == "[kthreadd]");
@@ -258,6 +268,8 @@ fn test_apply_exclude_kernel_threads_skips_in_results() {
         false,
         95.0,
         Some(&filter),
+        None,
+        None,
     )
     .unwrap();
     assert!(
@@ -295,8 +307,74 @@ fn test_apply_token_model_exclude_kernel_threads_skips_in_results() {
         false,
         false,
         Some(&filter),
+        None,
+        None,
     )
     .unwrap();
     assert!(!results.iter().any(|r| r.command_line == "[kthreadd]"));
     assert_eq!(results.len(), 2);
+}
+
+/// When applying with --machine or --machine-field, results include a machine label for filtering.
+#[test]
+fn test_apply_model_machine_field_in_results() {
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let train_commands = vec!["/bin/ls".to_string(), "/usr/bin/curl".to_string()];
+    let mut model = ModelHandler::train_from_csv(&train_commands, 2, None, None).unwrap();
+    model.normalize_model_and_compute_prior();
+
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(f, r#"{{"command":"/bin/ls","hostname":"server01"}}"#).unwrap();
+    writeln!(f, r#"{{"command":"/usr/bin/curl","hostname":"server02"}}"#).unwrap();
+    f.flush().unwrap();
+    let data = load_jsonl_with_columns(f.path().to_str().unwrap()).unwrap();
+
+    let results = ModelHandler::execute_on_data(
+        &mut model,
+        data,
+        "command",
+        false,
+        false,
+        false,
+        95.0,
+        None,
+        Some("hostname"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(results.len(), 2);
+    let ls = results.iter().find(|r| r.command_line == "/bin/ls").unwrap();
+    let curl = results.iter().find(|r| r.command_line == "/usr/bin/curl").unwrap();
+    assert_eq!(ls.machine.as_deref(), Some("server01"));
+    assert_eq!(curl.machine.as_deref(), Some("server02"));
+}
+
+#[test]
+fn test_apply_model_machine_override_in_results() {
+    let train_commands = vec!["/bin/ls".to_string()];
+    let mut model = ModelHandler::train_from_csv(&train_commands, 2, None, None).unwrap();
+    model.normalize_model_and_compute_prior();
+
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(f, r#"{{"command":"/bin/ls"}}"#).unwrap();
+    f.flush().unwrap();
+    let data = load_jsonl_with_columns(f.path().to_str().unwrap()).unwrap();
+
+    let results = ModelHandler::execute_on_data(
+        &mut model,
+        data,
+        "command",
+        false,
+        false,
+        false,
+        95.0,
+        None,
+        None,
+        Some("myhost"),
+    )
+    .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].machine.as_deref(), Some("myhost"));
 }

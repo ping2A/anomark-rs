@@ -78,6 +78,7 @@ pub fn group_results(
         let entry = grouped.entry(text.clone()).or_insert_with(|| ScoredResult {
             command_line: text,
             score,
+            machine: None,
             other_fields: AHashMap::new(),
             unusual_ngrams: None,
         });

@@ -183,6 +183,7 @@ impl ModelHandler {
 
     /// Execute token model on dataset. Threshold for explain = 95% of prior log.
     /// If `exclude_filter` is set, rows whose command matches (e.g. kernel threads) are skipped and not scored.
+    /// If `machine_override` or `machine_field` is set, each result gets a machine label for filtering.
     pub fn execute_on_data_token(
         model: &TokenMarkovModel,
         data: Vec<AHashMap<String, String>>,
@@ -191,6 +192,8 @@ impl ModelHandler {
         apply_filepath: bool,
         with_explain: bool,
         exclude_filter: Option<&TrainLineFilter>,
+        machine_field: Option<&str>,
+        machine_override: Option<&str>,
     ) -> Result<Vec<ScoredResult>> {
         let threshold = model.prior.ln() * 0.95;
         println!("Applying token model to data...");
@@ -208,6 +211,8 @@ impl ModelHandler {
             return Ok(vec![]);
         }
         let field_key = Self::resolve_field_key_from_data(&data, col_name)?;
+        let machine_field_key = machine_field
+            .and_then(|f| Self::resolve_field_key_from_data(&data, f).ok());
         let mut skipped = 0usize;
         let mut skipped_excluded = 0usize;
 
@@ -224,6 +229,9 @@ impl ModelHandler {
                     continue;
                 }
             }
+            let row_machine = machine_override
+                .map(String::from)
+                .or_else(|| machine_field_key.as_ref().and_then(|k| row.get(k).cloned()));
             if apply_placeholder {
                 text = apply_all_placeholders(&text, apply_filepath);
             }
@@ -237,9 +245,19 @@ impl ModelHandler {
             let entry = grouped.entry(text.clone()).or_insert_with(|| ScoredResult {
                 command_line: text.clone(),
                 score,
+                machine: row_machine.clone(),
                 other_fields: AHashMap::new(),
                 unusual_ngrams: unusual.clone(),
             });
+            if let Some(ref m) = row_machine {
+                if let Some(ref mut em) = entry.machine {
+                    if !em.contains(m) {
+                        entry.machine = Some(format!("{},{}", em, m));
+                    }
+                } else {
+                    entry.machine = Some(m.clone());
+                }
+            }
             for (key, value) in row {
                 if key != field_key {
                     entry.other_fields.entry(key).or_insert_with(Vec::new).push(value);
@@ -266,6 +284,7 @@ impl ModelHandler {
     /// Execute model on dataset and return scored results.
     /// If `with_explain` is true, populates `unusual_ngrams` using `explain_threshold_percent` (default 95).
     /// If `exclude_filter` is set, rows whose command matches (e.g. kernel threads) are skipped and not scored.
+    /// If `machine_override` is set, every row gets that label; else if `machine_field` is set, the value is taken from that column.
     pub fn execute_on_data(
         model: &mut MarkovModel,
         data: Vec<AHashMap<String, String>>,
@@ -275,6 +294,8 @@ impl ModelHandler {
         with_explain: bool,
         explain_threshold_percent: f64,
         exclude_filter: Option<&TrainLineFilter>,
+        machine_field: Option<&str>,
+        machine_override: Option<&str>,
     ) -> Result<Vec<ScoredResult>> {
         if !model.is_trained() {
             model.normalize_model_and_compute_prior();
@@ -298,6 +319,8 @@ impl ModelHandler {
             return Ok(vec![]);
         }
         let field_key = Self::resolve_field_key_from_data(&data, col_name)?;
+        let machine_field_key = machine_field
+            .and_then(|f| Self::resolve_field_key_from_data(&data, f).ok());
         let mut skipped = 0usize;
         let mut skipped_excluded = 0usize;
 
@@ -316,6 +339,10 @@ impl ModelHandler {
                 }
             }
 
+            let row_machine = machine_override
+                .map(String::from)
+                .or_else(|| machine_field_key.as_ref().and_then(|k| row.get(k).cloned()));
+
             if apply_placeholder {
                 text = apply_all_placeholders(&text, apply_filepath);
             }
@@ -331,9 +358,20 @@ impl ModelHandler {
             let entry = grouped.entry(text.clone()).or_insert_with(|| ScoredResult {
                 command_line: text.clone(),
                 score,
+                machine: row_machine.clone(),
                 other_fields: AHashMap::new(),
                 unusual_ngrams: unusual.clone(),
             });
+
+            if let Some(ref m) = row_machine {
+                if let Some(ref mut em) = entry.machine {
+                    if !em.contains(m) {
+                        entry.machine = Some(format!("{},{}", em, m));
+                    }
+                } else {
+                    entry.machine = Some(m.clone());
+                }
+            }
 
             for (key, value) in row {
                 if key != field_key {
@@ -441,6 +479,9 @@ impl ModelHandler {
                 println!("#{} | markovScore={:.6}", i + 1, result.score);
             }
 
+            if let Some(ref m) = result.machine {
+                println!("Machine: {}", m);
+            }
             if color {
                 println!("{}", Self::colored_results(&result.command_line, model, threshold));
             } else {
@@ -496,10 +537,13 @@ impl ModelHandler {
             .unwrap_or_default();
         other_keys.sort();
 
-        // Write headers
+        let has_machine = results.iter().any(|r| r.machine.is_some());
         let mut headers = vec!["CommandLine".to_string(), MARKOV_SCORE.to_string()];
         if suspect_threshold_ln.is_some() {
             headers.push("Suspect".to_string());
+        }
+        if has_machine {
+            headers.push("Machine".to_string());
         }
         for key in &other_keys {
             headers.push(format!("List of all {}", key));
@@ -530,6 +574,9 @@ impl ModelHandler {
                     "no"
                 };
                 record.push(s.to_string());
+            }
+            if has_machine {
+                record.push(result.machine.as_deref().unwrap_or("").to_string());
             }
             for original_key in &other_keys {
                 if let Some(values) = result.other_fields.get(original_key) {
@@ -584,6 +631,8 @@ pub struct UnusualNgram {
 pub struct ScoredResult {
     pub command_line: String,
     pub score: f64,
+    /// Optional machine/host identifier for filtering (from --machine or --machine-field).
+    pub machine: Option<String>,
     pub other_fields: AHashMap<String, Vec<String>>,
     /// When explainability is enabled: n-grams with log_prob below threshold
     pub unusual_ngrams: Option<Vec<UnusualNgram>>,
