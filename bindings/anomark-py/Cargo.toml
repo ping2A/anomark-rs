@@ -1,0 +1,14 @@
+[package]
+name = "anomark-py"
+version = "0.1.0"
+edition = "2021"
+description = "Python bindings for the anomark-rs Markov command-line anomaly detector"
+license = "MIT"
+
+[lib]
+name = "anomark_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+anomark = { path = "../.." }
+pyo3 = { version = "0.28", features = ["extension-module"] }

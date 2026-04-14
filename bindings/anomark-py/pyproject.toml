@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "anomark-rs"
+version = "0.1.0"
+description = "Python bindings for anomark-rs (Rust AnoMark-style command-line anomaly detection)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.maturin]
+# Must match `#[pymodule] fn anomark_rs` → `PyInit_anomark_rs` (crate lib name is `anomark_py`).
+module-name = "anomark_rs"

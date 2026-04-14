@@ -1,11 +1,24 @@
 # AnoMark - Rust
 
-**ORIGINAL PROJECT: https://github.com/ANSSI-FR/AnoMark**
+**ORIGINAL PROJECT: https://github.com/ANSSI-FR/AnoMark**  
 **Created with Claude.ai but supervised by a human (me apparently) JUST FOR FUN.**
 
 *Anomaly detection in command lines with Markov chains*
 
 A pure Rust implementation of the AnoMark algorithm for detecting malicious command lines using Markov Chains and n-grams.
+
+## This repository vs official AnoMark (ANSSI)
+
+| | **Official [AnoMark](https://github.com/ANSSI-FR/AnoMark)** (ANSSI) | **This project (anomark-rs)** |
+|---|--------|--------|
+| **Language** | Python (notebooks + scripts) | Rust |
+| **Runtime** | pip / conda, typical data-science stack | Native binaries + optional **Python bindings** ([PyO3](https://pyo3.rs/)) |
+| **Training inputs** | CSV and text helpers in the upstream workflow | Unified **`train`** CLI: CSV, JSONL, TXT; directories; `--format`; token trainer separate |
+| **Scoring / apply** | `apply_model.py` style workflow | `apply-model` / `apply-token-model`: JSONL, CSV, explainability, machine column, exclusions |
+| **Model format** | Python pickle / project-specific | `bincode` `.bin` (character and token models) — **not interchangeable** with upstream pickles |
+| **Extras here** | — | Token-level models, n-gram explainability, kernel-thread / regex exclusions, parallel training, mmap helpers, log generator, regression tests |
+
+The upstream tool is the reference from ANSSI; this repo is an **independent Rust port** with a similar statistical idea (Markov / n-grams on command text) but **different code, CLI, and file formats**. For production use of the original behaviour and ecosystem, use the official project; use this repo when you want Rust performance, a single static binary workflow, or Python access via `anomark_rs` after building the bindings.
 
 ## Features
 
@@ -18,6 +31,7 @@ A pure Rust implementation of the AnoMark algorithm for detecting malicious comm
 - **Explainability** - See which n-grams contributed to a low score (character or token level)
 - **Token-level models** - Optional word/token n-gram models (e.g. by whitespace or path segments)
 - **Training exclusions** - Drop Linux kernel-style names (`[nvme-wq]`) and/or custom regex patterns before training
+- **Python bindings** - Optional `anomark_rs` module (PyO3) to load models and score commands from Python
 
 ## Installation
 
@@ -38,6 +52,34 @@ cargo build --release
 
 # Binaries will be in target/release/
 ```
+
+## Python bindings (`anomark_rs`)
+
+The extension lives under [`bindings/anomark-py/`](bindings/anomark-py/). Build with [maturin](https://www.maturin.rs/) (recommended) or `cargo` from that directory.
+
+```bash
+cd bindings/anomark-py
+pip install maturin
+maturin develop --release   # editable install for the current venv
+# or: maturin build --release && pip install ../../target/wheels/anomark_rs-*.whl
+```
+
+Example:
+
+```python
+import anomark_rs
+
+m = anomark_rs.CharModel.load("models/my_model.bin")
+s = m.score("/usr/bin/curl -s https://example.com")
+print("suspect" if m.is_suspect(s) else "ok", s)
+
+t = anomark_rs.TokenModel.load("models/token.bin")
+print(t.score("curl http://example.com"))
+```
+
+API summary: **`CharModel.load` / `TokenModel.load`**, **`.score(command)`**, **`.suspect_threshold()`**, **`.is_suspect(score)`**, **`.explain(..., threshold_percent)`**, **`is_kernel_thread(cmd)`**, **`__version__`**. Train models with the Rust `train` / `train-token-model` CLIs first; `.bin` files are not compatible with upstream Python pickles.
+
+On **macOS**, if `cargo build` alone fails to link, use `maturin` or the `rustflags` in [`bindings/anomark-py/.cargo/config.toml`](bindings/anomark-py/.cargo/config.toml).
 
 ## Quick Start
 
